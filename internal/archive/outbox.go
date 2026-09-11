@@ -24,6 +24,8 @@ type SendCommand struct {
 	// Number starts a conversation with a phone number; the phone resolves it
 	// to an existing or new conversation ID.
 	Number string `json:"number,omitempty"`
+	// ReplyTo quotes an earlier message of the same conversation (RCS).
+	ReplyTo string `json:"reply_to,omitempty"`
 }
 
 var phoneNumberPattern = regexp.MustCompile(`^\+?[0-9]{6,15}$`)
@@ -51,6 +53,9 @@ func (c SendCommand) Valid() bool {
 	if c.Kind == "presence" {
 		return c.ConversationID == "" && (c.Body == "active" || c.Body == "idle") && len(c.Files) == 0 && c.MessageID == "" && c.Emoji == "" && c.Number == ""
 	}
+	if c.Kind == "typing" {
+		return c.ConversationID != "" && len(c.ConversationID) <= 512 && c.Body == "" && len(c.Files) == 0 && c.MessageID == "" && c.Emoji == "" && c.Number == "" && c.ReplyTo == ""
+	}
 	if c.Kind == "mark_read" {
 		return c.ConversationID != "" && len(c.ConversationID) <= 512 && c.MessageID != "" && len(c.MessageID) <= 512 && c.Body == "" && len(c.Files) == 0 && c.Emoji == "" && c.Number == ""
 	}
@@ -60,7 +65,7 @@ func (c SendCommand) Valid() bool {
 	if c.Kind == "react" {
 		return c.MessageID != "" && len(c.MessageID) <= 512 && len(c.Files) == 0 && c.Body == "" && (c.Emoji == "" || strings.Contains("|👍|❤️|😂|😮|😢|👎|", "|"+c.Emoji+"|"))
 	}
-	if c.Kind != "send_text" || !utf8.ValidString(c.Body) || len(c.Body) > 16000 || utf8.RuneCountInString(c.Body) > 4000 || len(c.Files) > 10 || (strings.TrimSpace(c.Body) == "" && len(c.Files) == 0) {
+	if c.Kind != "send_text" || !utf8.ValidString(c.Body) || len(c.Body) > 16000 || utf8.RuneCountInString(c.Body) > 4000 || len(c.Files) > 10 || (strings.TrimSpace(c.Body) == "" && len(c.Files) == 0) || len(c.ReplyTo) > 512 {
 		return false
 	}
 	var total int64

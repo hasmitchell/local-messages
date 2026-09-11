@@ -4,9 +4,9 @@ import UniformTypeIdentifiers
 
 struct MessageComposer: View {
     @EnvironmentObject private var model: ArchiveModel
-    @FocusState private var focused: Bool
+    @State private var focused = false
     @State private var choosingFiles = false
-    @State private var editorWidth: CGFloat = 400
+    @State private var editorHeight: CGFloat = 20
     @AppStorage("spellCheck") private var spellCheck = true
     @AppStorage("autocorrect") private var autocorrect = false
 
@@ -23,6 +23,7 @@ struct MessageComposer: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
+            if model.draft.replyTo != nil { ReplyStrip() }
             if !model.draft.attachments.isEmpty { AttachmentStrip() }
             HStack(alignment: .bottom, spacing: 4) {
                 Button { choosingFiles = true } label: {
@@ -53,48 +54,42 @@ struct MessageComposer: View {
             }
         }
         .padding(.horizontal, 14).padding(.top, 8).padding(.bottom, 10)
-        .onChange(of: model.showingThreadSearch) { _, showing in if showing { focused = false } }
         .fileImporter(isPresented: $choosingFiles, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
             if case .success(let urls) = result { model.attach(urls) }
         }
     }
 
-    // Height follows the wrapped text for the current editor width. Measuring
-    // with AppKit avoids a SwiftUI layout feedback loop between a hidden twin
-    // view and the editor frame.
-    private var editorHeight: CGFloat {
-        let body = model.draft.body
-        let text = body.isEmpty ? " " : body + (body.hasSuffix("\n") ? " " : "")
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.lineSpacing = 1
-        let attributed = NSAttributedString(string: text, attributes: [.font: NSFont.systemFont(ofSize: 14), .paragraphStyle: paragraph])
-        let bounds = attributed.boundingRect(with: CGSize(width: max(40, editorWidth - 10), height: .greatestFiniteMagnitude), options: [.usesLineFragmentOrigin, .usesFontLeading])
-        return min(max(ceil(bounds.height) + 6, 22), 150)
-    }
-
     private var editor: some View {
-        ZStack(alignment: .topLeading) {
-            TextEditor(text: Binding(get: { model.draft.body }, set: { model.editDraft($0) }))
-                .font(.system(size: 14)).lineSpacing(1).focused($focused).scrollContentBackground(.hidden)
-                .frame(height: editorHeight)
-                .background(GeometryReader { proxy in Color.clear.preference(key: ComposerWidthPreference.self, value: proxy.size.width) })
-                .background(TextViewOptions(spellCheck: spellCheck, autocorrect: autocorrect))
-                .disabled(model.draft.submissionID != nil)
-                .accessibilityIdentifier("messageComposer").accessibilityLabel("Message composer")
-            if model.draft.body.isEmpty {
-                Text("Message").font(.system(size: 14)).foregroundStyle(.tertiary).padding(.leading, 5).padding(.top, 2).allowsHitTesting(false)
-            }
-        }
-        .onPreferenceChange(ComposerWidthPreference.self) { width in
-            if abs(width - editorWidth) > 0.5 { editorWidth = width }
-        }
-        .padding(.vertical, 3)
+        ComposerTextView(text: Binding(get: { model.draft.body }, set: { model.editDraft($0) }),
+                         isEditable: model.draft.submissionID == nil, spellCheck: spellCheck, autocorrect: autocorrect,
+                         placeholder: "Message",
+                         onHeightChange: { editorHeight = $0 },
+                         onFocusChange: { focused = $0 },
+                         onAttachFiles: { model.attach($0) },
+                         onAttachData: { model.attachData($0, suggestedName: $1) })
+            .frame(height: min(max(editorHeight, 22), 150))
+            .accessibilityIdentifier("messageComposer").accessibilityLabel("Message composer")
+            .padding(.vertical, 3)
     }
 }
 
-private struct ComposerWidthPreference: PreferenceKey {
-    static let defaultValue: CGFloat = 400
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+// What the draft will quote, with a way to drop it.
+private struct ReplyStrip: View {
+    @EnvironmentObject private var model: ArchiveModel
+    var body: some View {
+        HStack(spacing: 8) {
+            RoundedRectangle(cornerRadius: 1.5).fill(archiveAccent).frame(width: 3, height: 28)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Replying to " + (model.replyTarget.map { $0.outgoing ? "yourself" : $0.sender } ?? "an earlier message")).font(.caption.weight(.semibold))
+                Text(verbatim: model.replyTarget?.preview ?? "").font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            }
+            Spacer()
+            Button { model.setReplyTarget(nil) } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
+                .buttonStyle(.plain).accessibilityLabel("Cancel reply").help("Cancel reply")
+        }
+        .padding(.horizontal, 10).padding(.vertical, 6)
+        .background(composerField, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
 }
 
 private struct AttachmentStrip: View {
@@ -129,48 +124,5 @@ private struct AttachmentStrip: View {
                 }
             }.padding(.horizontal, 4)
         }.scrollIndicators(.hidden)
-    }
-}
-
-// SwiftUI's TextEditor has no spell-checking controls on macOS, so this
-// locates the underlying text view beside it and applies the preferences.
-private struct TextViewOptions: NSViewRepresentable {
-    let spellCheck: Bool
-    let autocorrect: Bool
-    func makeNSView(context: Context) -> Probe { let probe = Probe(); apply(probe); return probe }
-    func updateNSView(_ nsView: Probe, context: Context) { apply(nsView) }
-    private func apply(_ probe: Probe) {
-        probe.spellCheck = spellCheck
-        probe.autocorrect = autocorrect
-        probe.applyWhenReady()
-    }
-    final class Probe: NSView {
-        var spellCheck = true
-        var autocorrect = false
-        override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); applyWhenReady() }
-        func applyWhenReady() {
-            DispatchQueue.main.async { [weak self] in self?.applyNow() }
-        }
-        private func applyNow() {
-            var ancestor: NSView? = superview
-            for _ in 0..<4 {
-                guard let candidate = ancestor else { return }
-                if let textView = Self.textView(in: candidate) {
-                    textView.isContinuousSpellCheckingEnabled = spellCheck
-                    textView.isGrammarCheckingEnabled = false
-                    textView.isAutomaticSpellingCorrectionEnabled = autocorrect
-                    #if UI_SNAPSHOTS
-                    FileHandle.standardError.write(Data("spellcheck applied: \(textView.isContinuousSpellCheckingEnabled)\n".utf8))
-                    #endif
-                    return
-                }
-                ancestor = candidate.superview
-            }
-        }
-        private static func textView(in view: NSView) -> NSTextView? {
-            if let textView = view as? NSTextView { return textView }
-            for child in view.subviews { if let found = textView(in: child) { return found } }
-            return nil
-        }
     }
 }

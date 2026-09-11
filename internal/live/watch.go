@@ -2,11 +2,14 @@ package live
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"github.com/google/uuid"
 	"go.mau.fi/mautrix-gmessages/pkg/libgm"
 	"io"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -32,6 +35,22 @@ type Status struct {
 	Connection string `json:"connection,omitempty"`
 	State      string `json:"state"`
 	Time       string `json:"time"`
+}
+
+// TypingStatus is the one other line the worker prints. The conversation is
+// identified by a digest so the stream still carries no raw identifiers.
+type TypingStatus struct {
+	Typing TypingInfo `json:"typing"`
+	Time   string     `json:"time"`
+}
+type TypingInfo struct {
+	Conversation string `json:"conversation"`
+	Active       bool   `json:"active"`
+}
+
+func conversationDigest(id string) string {
+	sum := sha256.Sum256([]byte(id))
+	return hex.EncodeToString(sum[:8])
 }
 
 func Watch(ctx context.Context, store *archive.Store, opts Options, output io.Writer) error {
@@ -61,13 +80,21 @@ func watch(ctx context.Context, store *archive.Store, opts Options, output io.Wr
 	go func() { defer close(commandDone); router.run(commandCtx, opts.Commands) }()
 	defer func() { stopCommands(); <-commandDone }()
 	encoder := json.NewEncoder(output)
+	var outputMu sync.Mutex
 	emit := func(state string) {
+		outputMu.Lock()
+		defer outputMu.Unlock()
 		_ = encoder.Encode(Status{State: state, Time: time.Now().UTC().Format(time.RFC3339), Connection: router.token()})
+	}
+	typing := func(conversationID string, active bool) {
+		outputMu.Lock()
+		defer outputMu.Unlock()
+		_ = encoder.Encode(TypingStatus{Typing: TypingInfo{Conversation: conversationDigest(conversationID), Active: active}, Time: time.Now().UTC().Format(time.RFC3339)})
 	}
 	retry := 2 * time.Second
 	for ctx.Err() == nil {
 		child, cancel := context.WithCancel(ctx)
-		buffer := &eventBuffer{cancel: cancel, wake: make(chan struct{}, 1)}
+		buffer := &eventBuffer{cancel: cancel, wake: make(chan struct{}, 1), onTyping: typing}
 		emit("connecting")
 		client, err := connect(child, store.Dir, buffer.observe)
 		if err == nil {
@@ -226,6 +253,9 @@ func runSession(ctx context.Context, store *archive.Store, client source, buffer
 			}
 			nextInventory = time.Now().Add(inventoryInterval)
 			if err := refreshAvatars(ctx, store, client, avatarBatchLimit); err != nil {
+				return err
+			}
+			if err := refreshContacts(ctx, store, client); err != nil {
 				return err
 			}
 		}

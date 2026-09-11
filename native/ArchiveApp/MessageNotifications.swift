@@ -14,18 +14,32 @@ final class MessageNotifications: NSObject, ObservableObject, UNUserNotification
     private let center = UNUserNotificationCenter.current()
     private var archiveToken: String?
     private var selectMessage: ((String, String) -> Void)?
+    private var replyHandler: ((String, String) -> Void)?
     private var permission: UNAuthorizationStatus = .notDetermined
+    private static let messageCategory = "message"
 
     override init() {
         super.init()
         center.delegate = self
+        // Inline replies: the text goes through the ordinary send path.
+        let reply = UNTextInputNotificationAction(identifier: "reply", title: "Reply", options: [], textInputButtonTitle: "Send", textInputPlaceholder: "Message")
+        center.setNotificationCategories([UNNotificationCategory(identifier: Self.messageCategory, actions: [reply], intentIdentifiers: [], options: [])])
         Task { await refreshSettings() }
     }
-    func configure(directory: URL?, select: ((String, String) -> Void)?) {
+    func configure(directory: URL?, select: ((String, String) -> Void)?, reply: ((String, String) -> Void)?) {
         let token = directory.map { Self.token($0.standardizedFileURL.path) }
         if token != archiveToken { center.removeAllPendingNotificationRequests(); center.removeAllDeliveredNotifications() }
         archiveToken = token
         selectMessage = select
+        replyHandler = reply
+    }
+    /// A local notice when a notification reply could not be handed to the phone.
+    func deliverFailure(_ title: String, body: String) async {
+        guard enabled, permission == .authorized || permission == .provisional else { return }
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        try? await center.add(UNNotificationRequest(identifier: "reply-failure-" + UUID().uuidString, content: content, trigger: nil))
     }
     private static func token(_ value: String) -> String { SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined() }
     func refreshSettings() async {
@@ -87,6 +101,7 @@ final class MessageNotifications: NSObject, ObservableObject, UNUserNotification
         content.body = previews ? String(message.preview.prefix(240)) : "You have a new message."
         content.sound = .default
         content.threadIdentifier = Self.token(token + message.conversationID)
+        content.categoryIdentifier = Self.messageCategory
         content.userInfo = ["archive": token, "conversation": message.conversationID, "message": message.id]
         let request = UNNotificationRequest(identifier: Self.token(token + ":" + message.id), content: content, trigger: nil)
         do {
@@ -116,9 +131,15 @@ final class MessageNotifications: NSObject, ObservableObject, UNUserNotification
     }
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification) async -> UNNotificationPresentationOptions { [.banner, .sound] }
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
-        guard response.actionIdentifier == UNNotificationDefaultActionIdentifier else { return }
         let info = response.notification.request.content.userInfo
         let archive = info["archive"] as? String, conversation = info["conversation"] as? String, message = info["message"] as? String
+        if response.actionIdentifier == "reply", let text = (response as? UNTextInputNotificationResponse)?.userText {
+            await MainActor.run {
+                if let archive, archive == self.archiveToken, let conversation { self.replyHandler?(conversation, text) }
+            }
+            return
+        }
+        guard response.actionIdentifier == UNNotificationDefaultActionIdentifier else { return }
         await MainActor.run {
             NSApp.activate(ignoringOtherApps: true)
             if let archive, archive == self.archiveToken, let conversation, let message { self.selectMessage?(conversation, message) }

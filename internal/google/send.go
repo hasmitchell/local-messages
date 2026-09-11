@@ -35,14 +35,18 @@ func buildTextRequest(command archive.SendCommand, conv *gmproto.Conversation, s
 	if outgoing == "" || sim.GetSIMParticipant().GetID() != outgoing || sim.GetSIMData().GetSIMPayload() == nil {
 		return nil, fmt.Errorf("phone SIM details unavailable")
 	}
-	return &gmproto.SendMessageRequest{
+	request := &gmproto.SendMessageRequest{
 		ConversationID: command.ConversationID, TmpID: command.ID,
 		MessagePayload: &gmproto.MessagePayload{ConversationID: command.ConversationID, ParticipantID: outgoing, TmpID: command.ID, TmpID2: command.ID,
 			MessageInfo: []*gmproto.MessageInfo{{Data: &gmproto.MessageInfo_MessageContent{MessageContent: &gmproto.MessageContent{Content: command.Body}}}}},
 		SIMPayload: proto.Clone(sim.GetSIMData().GetSIMPayload()).(*gmproto.SIMPayload),
 		// Follow the phone's transport settings; never force a fallback/retry.
 		ForceRCS: false,
-	}, nil
+	}
+	if command.ReplyTo != "" {
+		request.Reply = &gmproto.ReplyPayload{MessageID: command.ReplyTo}
+	}
+	return request, nil
 }
 
 // Preflight performs only reads. The returned function makes exactly one send
@@ -59,6 +63,7 @@ func (c *Client) prepareRoute(ctx context.Context, command archive.SendCommand) 
 	if sim != nil {
 		sim = proto.Clone(sim).(*gmproto.SIMCard)
 	}
+	c.outgoing[conv.GetConversationID()] = conv.GetDefaultOutgoingID()
 	c.simMu.Unlock()
 	return buildTextRequest(command, conv, sim)
 }

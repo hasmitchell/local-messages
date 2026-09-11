@@ -40,6 +40,12 @@ struct ConversationParticipant: Codable, Sendable, Hashable, Identifiable {
     enum CodingKeys: String, CodingKey { case id, name, number; case isMe = "is_me" }
 }
 
+struct ContactEntry: Identifiable, Sendable, Hashable {
+    let id, name, number: String
+    var avatarPath: String? = nil
+    var title: String { name.isEmpty ? number : name }
+}
+
 struct SharedFile: Identifiable, Sendable {
     let message: MessageRecord
     let attachment: AttachmentRecord

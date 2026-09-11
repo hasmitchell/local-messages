@@ -52,6 +52,9 @@ type starter interface {
 type readMarker interface {
 	MarkRead(context.Context, string, string) error
 }
+type typer interface {
+	Typing(context.Context, string) error
+}
 type sendSession struct {
 	token   string
 	ctx     context.Context
@@ -95,6 +98,14 @@ func (r *commandRouter) execute(command archive.SendCommand, session *sendSessio
 	}
 	if command.Kind == "mark_read" {
 		return r.markRead(command, session)
+	}
+	if command.Kind == "typing" {
+		if command.Valid() && session != nil && session.ctx.Err() == nil && command.Connection == session.token {
+			if client, ok := session.client.(typer); ok {
+				_ = client.Typing(session.ctx, command.ConversationID)
+			}
+		}
+		return nil
 	}
 	created, err := r.store.ReserveSend(command)
 	if err != nil || !created {

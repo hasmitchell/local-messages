@@ -48,12 +48,18 @@ struct SyncStatus: Decodable, Sendable {
     let time: String
     let connection: String?
 }
+/// The worker's other line: a digest of the conversation someone is typing in.
+struct TypingStatus: Decodable, Sendable {
+    struct Info: Decodable, Sendable { let conversation: String; let active: Bool }
+    let typing: Info
+}
 
 // Owns one child process. A private stdin pipe is a lifetime signal: closing the
 // app, switching archives or a crash closes it and shuts the worker down.
 @MainActor
 final class SyncController: NSObject {
     private let onState: (SyncState) -> Void
+    var onTyping: ((String, Bool) -> Void)?
     private let workerURL: URL
     private var retiring: [Process] = []
     private var process: Process?
@@ -143,8 +149,12 @@ final class SyncController: NSObject {
                     // The worker emits only this small allowlisted status schema.
                     for try await line in stdout.fileHandleForReading.bytes.lines {
                         guard !Task.isCancelled, let self, self.generation == token else { return }
-                        guard line.utf8.count < 512, let data = line.data(using: .utf8),
-                              let status = try? JSONDecoder().decode(SyncStatus.self, from: data) else { continue }
+                        guard line.utf8.count < 512, let data = line.data(using: .utf8) else { continue }
+                        if let typing = try? JSONDecoder().decode(TypingStatus.self, from: data) {
+                            self.onTyping?(typing.typing.conversation, typing.typing.active)
+                            continue
+                        }
+                        guard let status = try? JSONDecoder().decode(SyncStatus.self, from: data) else { continue }
                         if status.state == .pairingRequired { self.terminalState = true }
                         self.connectionID = status.connection
                         self.onState(status.state)

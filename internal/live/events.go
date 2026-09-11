@@ -24,6 +24,8 @@ type eventBuffer struct {
 	priority map[string]time.Time
 	wake     chan struct{}
 	cancel   func()
+	// onTyping forwards the phone's typing notices to the app straight away.
+	onTyping func(conversationID string, typing bool)
 }
 
 func (b *eventBuffer) observe(event any) {
@@ -44,6 +46,10 @@ func (b *eventBuffer) observe(event any) {
 		// re-read current phone data so an old event cannot overwrite a new edit.
 		if !e.IsOld {
 			b.mark(e.GetConversationID(), time.UnixMicro(e.GetTimestamp()))
+		}
+	case *gmproto.TypingData:
+		if b.onTyping != nil && e.GetConversationID() != "" {
+			b.onTyping(e.GetConversationID(), e.GetType() == gmproto.TypingTypes_STARTED_TYPING)
 		}
 	case *gmproto.Conversation:
 		b.pending.inventory = true

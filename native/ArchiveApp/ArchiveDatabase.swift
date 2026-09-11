@@ -148,6 +148,24 @@ actor ArchiveDatabase {
         return try window(messages, conversation: conversation)
     }
 
+    /// Address-book entries matching a name or number fragment, newest listing first.
+    func contacts(matching query: String, limit: Int = 30) throws -> [ContactEntry] {
+        guard try hasTable("contacts") else { return [] }
+        let needle = query.trimmingCharacters(in: .whitespaces)
+        let digits = needle.filter(\.isNumber)
+        let rows = try ReadStatement(connection, "SELECT participant_id,name,number FROM contacts WHERE (?='' OR name LIKE ? COLLATE NOCASE OR replace(replace(replace(number,' ',''),'-',''),'(','') LIKE ?) ORDER BY name COLLATE NOCASE LIMIT ?",
+            [.text(needle), .text("%" + needle + "%"), .text("%" + (digits.isEmpty ? needle : digits) + "%"), .integer(Int64(max(1, min(limit, 200))))])
+        let avatars = try avatarPaths()
+        var result: [ContactEntry] = []
+        while try rows.next() {
+            result.append(ContactEntry(id: rows.text(0), name: rows.text(1), number: rows.text(2), avatarPath: avatars[rows.text(0)]))
+        }
+        return result
+    }
+    func hasContacts() throws -> Bool {
+        guard try hasTable("contacts") else { return false }
+        return try scalar("SELECT EXISTS(SELECT 1 FROM contacts)", []) == 1
+    }
     private func avatarPaths() throws -> [String: String] {
         guard try hasTable("participant_avatars") else { return [:] }
         let rows = try ReadStatement(connection, "SELECT participant_id,path FROM participant_avatars WHERE path!=''")

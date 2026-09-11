@@ -20,6 +20,7 @@ import (
 	"go.mau.fi/mautrix-gmessages/pkg/libgm"
 	"go.mau.fi/mautrix-gmessages/pkg/libgm/events"
 	"go.mau.fi/mautrix-gmessages/pkg/libgm/gmproto"
+	"google.golang.org/protobuf/proto"
 	"go.mau.fi/util/exhttp"
 	"google.golang.org/protobuf/encoding/protojson"
 	"local/GoogleMessagingAppMac/internal/archive"
@@ -38,6 +39,9 @@ type Client struct {
 	MediaProgress   func(string)
 	simMu           sync.Mutex
 	sims            map[string]*gmproto.SIMCard
+	// outgoing remembers each conversation's sending participant so typing
+	// updates need no extra round trip to the phone.
+	outgoing map[string]string
 }
 type session struct {
 	Auth *libgm.AuthData `json:"auth"`
@@ -58,7 +62,7 @@ func newClient(dir string) (*Client, error) {
 	if _, err = os.Stat(helper); err != nil {
 		return nil, fmt.Errorf("build the native account helper with ./scripts/build")
 	}
-	return &Client{helper: helper, account: hex.EncodeToString(key[:]), directory: abs}, nil
+	return &Client{helper: helper, account: hex.EncodeToString(key[:]), directory: abs, outgoing: map[string]string{}}, nil
 }
 func (c *Client) helperCall(ctx context.Context, action string, input []byte) ([]byte, error) {
 	args := []string{action}
@@ -187,10 +191,64 @@ func (c *Client) Conversations(ctx context.Context, folder gmproto.ListConversat
 		return nil, &safeRequestError{label: "Google conversation listing failed for " + folder.String(), cause: err}
 	}
 	out := []archive.Conversation{}
+	c.simMu.Lock()
 	for _, raw := range resp.GetConversations() {
+		if raw.GetDefaultOutgoingID() != "" {
+			c.outgoing[raw.GetConversationID()] = raw.GetDefaultOutgoingID()
+		}
 		out = append(out, ConvertConversation(raw, folder.String()))
 	}
+	c.simMu.Unlock()
 	return out, nil
+}
+
+// Typing tells the phone that a reply is being written; the phone times the
+// indicator out on its own, so no stop message is sent.
+func (c *Client) Typing(ctx context.Context, conversationID string) error {
+	c.simMu.Lock()
+	outgoing, known := c.outgoing[conversationID]
+	sim := c.sims[outgoing]
+	c.simMu.Unlock()
+	if !known || sim == nil {
+		lookupCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		conv, err := c.GM.GetConversation(lookupCtx, conversationID)
+		cancel()
+		if err != nil {
+			return &safeRequestError{label: "typing update failed", cause: err}
+		}
+		c.simMu.Lock()
+		c.outgoing[conversationID] = conv.GetDefaultOutgoingID()
+		sim = c.sims[conv.GetDefaultOutgoingID()]
+		c.simMu.Unlock()
+	}
+	if sim == nil || sim.GetSIMData().GetSIMPayload() == nil {
+		return fmt.Errorf("phone SIM details unavailable")
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	if err := c.GM.SetTyping(requestCtx, conversationID, proto.Clone(sim.GetSIMData().GetSIMPayload()).(*gmproto.SIMPayload)); err != nil {
+		return &safeRequestError{label: "typing update failed", cause: err}
+	}
+	return nil
+}
+
+// Contacts returns the phone's address book as Google Messages lists it.
+func (c *Client) Contacts(ctx context.Context) ([]archive.Contact, error) {
+	requestCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	defer cancel()
+	resp, err := c.GM.ListContacts(requestCtx)
+	if err != nil {
+		return nil, &safeRequestError{label: "Google contact listing failed", cause: err}
+	}
+	var contacts []archive.Contact
+	for _, raw := range resp.GetContacts() {
+		number := raw.GetNumber().GetFormattedNumber()
+		if number == "" {
+			number = raw.GetNumber().GetNumber()
+		}
+		contacts = append(contacts, archive.Contact{ParticipantID: raw.GetParticipantID(), Name: raw.GetName(), Number: number, ContactID: raw.GetContactID()})
+	}
+	return contacts, nil
 }
 
 func ConvertConversation(raw *gmproto.Conversation, folder string) archive.Conversation {

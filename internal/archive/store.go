@@ -162,6 +162,7 @@ func Open(dir string) (*Store, error) {
       CREATE TABLE IF NOT EXISTS outbox_commands(id TEXT PRIMARY KEY,payload BLOB NOT NULL);
       CREATE TABLE IF NOT EXISTS media_gc(path TEXT PRIMARY KEY);
       CREATE TABLE IF NOT EXISTS participant_avatars(participant_id TEXT PRIMARY KEY,path TEXT NOT NULL,hash TEXT NOT NULL,updated INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS contacts(participant_id TEXT PRIMARY KEY,name TEXT NOT NULL,number TEXT NOT NULL,contact_id TEXT NOT NULL,updated INTEGER NOT NULL);
     `)
 	if err != nil {
 		db.Close()

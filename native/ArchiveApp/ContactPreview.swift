@@ -7,6 +7,9 @@ struct ContactPreview: View {
     @State private var contacts: [SharedContact]?
     @State private var error: String?
     @State private var openingError: String?
+    @State private var importResult: String?
+    @State private var importing = false
+    @State private var googleContainer: ContactImporter.Container?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -48,18 +51,42 @@ struct ContactPreview: View {
             Divider()
             VStack(alignment: .leading, spacing: 10) {
                 if let openingError { Text(openingError).foregroundStyle(.red).font(.callout) }
-                HStack {
+                if let importResult { Text(importResult).foregroundStyle(.secondary).font(.callout) }
+                HStack(spacing: 8) {
                     Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+                    Button("Open in Contacts…", action: openInContacts).disabled(contacts == nil)
                     Spacer()
-                    Button("Open in Contacts…", action: openInContacts).buttonStyle(.borderedProminent).disabled(contacts == nil)
+                    if importing { ProgressView().controlSize(.small) }
+                    if let googleContainer {
+                        Button("Add to Google Contacts") { add(to: googleContainer) }.buttonStyle(.borderedProminent).disabled(contacts == nil || importing)
+                            .help("Saves into the \(googleContainer.name) account in macOS Contacts, which syncs to your phone")
+                    }
+                    if googleContainer == nil {
+                        Button("Add to Contacts") { add(to: nil) }.buttonStyle(.borderedProminent).disabled(contacts == nil || importing)
+                    } else {
+                        Button("Add to Contacts (local)") { add(to: nil) }.disabled(contacts == nil || importing)
+                    }
                 }
-                Text("Saved locally. Opening this preview does not add anyone to your contacts.").font(.caption).foregroundStyle(.secondary)
+                Text(googleContainer == nil
+                     ? "Adds to your default Contacts account. To reach your phone, add your Google account under System Settings → Internet Accounts with Contacts enabled."
+                     : "Previewing does not add anyone; only the Add buttons write to Contacts.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }.padding(20)
         }
         .frame(width: 500, height: 510)
         .task(id: url) {
             do { contacts = try await SharedContactReader.shared.load(url: url) }
             catch { self.error = error.localizedDescription }
+            googleContainer = await ContactImporter.googleContainer()
+        }
+    }
+
+    private func add(to container: ContactImporter.Container?) {
+        importing = true; importResult = nil
+        Task {
+            let outcome = await ContactImporter.add(vcardAt: url, to: container)
+            importResult = outcome
+            importing = false
         }
     }
 

@@ -1,4 +1,5 @@
 import AppKit
+import CryptoKit
 import SwiftUI
 
 enum ConversationFilter: String, CaseIterable, Identifiable {
@@ -64,11 +65,44 @@ final class ArchiveModel: ObservableObject {
     @Published var syncState: SyncState = .local
     @Published var canSync = false
     @Published var syncEnabled = !UserDefaults.standard.bool(forKey: "syncPaused")
-    private lazy var syncController = SyncController { [weak self] state in
-        guard let self else { return }
-        let wasReady = self.syncState.canSend
-        self.syncState = state
-        if state.canSend && !wasReady { self.sendPresence() }
+    private lazy var syncController: SyncController = {
+        let controller = SyncController { [weak self] state in
+            guard let self else { return }
+            let wasReady = self.syncState.canSend
+            self.syncState = state
+            if state.canSend && !wasReady { self.sendPresence() }
+        }
+        controller.onTyping = { [weak self] digest, active in self?.typingChanged(digest: digest, active: active) }
+        return controller
+    }()
+    /// Conversations where the other side is typing, by the worker's digest of the conversation id.
+    @Published private(set) var typingDigests: [String: Date] = [:]
+    private var typingDigestCache: [String: String] = [:]
+    private var lastTypingSent: (conversation: String, at: Date)?
+    private func typingChanged(digest: String, active: Bool) {
+        if active { typingDigests[digest] = Date() } else { typingDigests.removeValue(forKey: digest) }
+    }
+    private func typingDigest(_ conversationID: String) -> String {
+        if let cached = typingDigestCache[conversationID] { return cached }
+        let digest = String(SHA256.hash(data: Data(conversationID.utf8)).map { String(format: "%02x", $0) }.joined().prefix(16))
+        typingDigestCache[conversationID] = digest
+        return digest
+    }
+    /// True while the other side has typed within the last eight seconds.
+    func isTyping(_ conversationID: String) -> Bool {
+        guard let at = typingDigests[typingDigest(conversationID)] else { return false }
+        return Date().timeIntervalSince(at) < 8
+    }
+    private func expireTyping() {
+        let stale = typingDigests.filter { Date().timeIntervalSince($0.value) >= 8 }.map(\.key)
+        for key in stale { typingDigests.removeValue(forKey: key) }
+    }
+    /// Lets the phone show that a reply is being written, at most once every four seconds.
+    private func sendTypingIfNeeded(_ conversationID: String) {
+        guard canSync, syncEnabled, syncState.canSend, !pairingBusy else { return }
+        if let last = lastTypingSent, last.conversation == conversationID, Date().timeIntervalSince(last.at) < 4 { return }
+        lastTypingSent = (conversationID, Date())
+        try? syncController.send(SendCommand(kind: "typing", id: UUID().uuidString.lowercased(), conversationID: conversationID, body: ""))
     }
     /// The worker polls the phone less while the app is not in front; fresh messages still arrive through events.
     func sendPresence() {
@@ -108,9 +142,50 @@ final class ArchiveModel: ObservableObject {
     }
     func editDraft(_ body: String) {
         guard let id = selectedID, draft.submissionID == nil, let directory else { return }
-        drafts[id] = DraftRecord(body: body, files: draft.files)
+        let previous = draft.body
+        drafts[id] = DraftRecord(body: body, files: draft.files, replyTo: draft.replyTo)
         composerError = nil
         persistDrafts(directory: directory)
+        if body.count > previous.count { sendTypingIfNeeded(id) }
+    }
+    /// The message the draft will quote; nil when it is not in the loaded page.
+    var replyTarget: MessageRecord? { draft.replyTo.flatMap { id in messages.first { $0.id == id } } }
+    func setReplyTarget(_ message: MessageRecord?) {
+        guard let id = selectedID, draft.submissionID == nil, let directory else { return }
+        drafts[id] = DraftRecord(body: draft.body, files: draft.files, replyTo: message?.id)
+        persistDrafts(directory: directory)
+    }
+    /// Sends text straight from a notification reply; the outbox still records the attempt.
+    func quickReply(conversation: String, text: String) {
+        guard canSync, syncEnabled, syncState.canSend, !pairingBusy, SendCommand.validBody(text),
+              conversations.contains(where: { $0.id == conversation }) else {
+            Task { await notifications.deliverFailure("Reply not sent", body: "The phone connection is not ready. Open Local Messages to send it.") }
+            return
+        }
+        do { try syncController.send(SendCommand(id: UUID().uuidString.lowercased(), conversationID: conversation, body: text)) }
+        catch { Task { await notifications.deliverFailure("Reply not sent", body: "The phone connection dropped. Open Local Messages to send it.") } }
+    }
+    /// Data dropped or pasted into the conversation becomes a staged file.
+    func attachData(_ data: Data, suggestedName: String) {
+        guard selectedID != nil, !data.isEmpty, data.count <= DraftAttachment.byteLimit else { composerError = AttachmentFailure.limit.localizedDescription; return }
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("local-messages-paste-" + UUID().uuidString, isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            let file = folder.appendingPathComponent(suggestedName)
+            try data.write(to: file, options: .atomic)
+            attach([file])
+            Task { try? await Task.sleep(for: .seconds(30)); try? FileManager.default.removeItem(at: folder) }
+        } catch { composerError = AttachmentFailure.storage.localizedDescription }
+    }
+    func hasContacts() async -> Bool { (try? await database?.hasContacts()) ?? false }
+    func searchContacts(_ query: String) async -> [ContactEntry] {
+        guard let database else { return [] }
+        return (try? await database.contacts(matching: query)) ?? []
+    }
+    func contactAvatarURL(_ entry: ContactEntry) -> URL? {
+        guard let directory, let path = entry.avatarPath else { return nil }
+        let record = ConversationRecord(id: entry.id, name: entry.name, folder: "INBOX", timestamp: 0, preview: "", messageCount: 0, participants: [ConversationParticipant(id: entry.id, name: entry.name, number: entry.number, isMe: false, avatarPath: path)])
+        return record.avatarURL(in: directory)
     }
     private func persistDrafts(directory: URL) {
         draftRevision += 1
@@ -123,8 +198,8 @@ final class ArchiveModel: ObservableObject {
     func sendDraft() {
         guard canSendDraft, let id = selectedID, let directory else { return }
         let body = draft.body, submission = UUID().uuidString.lowercased(), generation = archiveGeneration
-        let files = draft.files
-        drafts[id] = DraftRecord(body: body, submissionID: submission, files: files)
+        let files = draft.files, replyTo = draft.replyTo
+        drafts[id] = DraftRecord(body: body, submissionID: submission, files: files, replyTo: replyTo)
         draftRevision += 1
         let revision = draftRevision, snapshot = drafts
         composerError = nil
@@ -134,7 +209,7 @@ final class ArchiveModel: ObservableObject {
                 // committed an outbox row. A crash cannot silently lose a draft.
                 try await draftRepository.save(snapshot, directory: directory, revision: revision)
                 guard archiveGeneration == generation else { return }
-                try syncController.send(SendCommand(id: submission, conversationID: id, body: body, files: files))
+                try syncController.send(SendCommand(id: submission, conversationID: id, body: body, files: files, replyTo: replyTo))
                 if selectedID == id {
                     showLatest()
                     pendingScrollID = submission
@@ -260,7 +335,7 @@ final class ArchiveModel: ObservableObject {
         composerError = nil
         previewURL = nil; library = ConversationLibrary(); libraryLoading = false; libraryError = nil
         settingsNotice = nil; settingsError = nil
-        notifications.configure(directory: nil, select: nil)
+        notifications.configure(directory: nil, select: nil, reply: nil)
         let generation = UUID()
         archiveGeneration = generation
         messageGeneration = UUID()
@@ -302,10 +377,13 @@ final class ArchiveModel: ObservableObject {
                     do { try store.register(directory: url); accounts = store.profiles }
                     catch { accountError = "This archive opened, but it could not be saved to the account list." }
                 }
-                notifications.configure(directory: live ? url : nil) { [weak self] conversation, message in
+                notifications.configure(directory: live ? url : nil, select: { [weak self] conversation, message in
                     guard self?.archiveGeneration == generation else { return }
                     self?.select(conversation, messageID: message)
-                }
+                }, reply: { [weak self] conversation, text in
+                    guard self?.archiveGeneration == generation else { return }
+                    self?.quickReply(conversation: conversation, text: text)
+                })
                 syncController.configure(directory: live ? directory : nil, enabled: syncEnabled)
                 observeChanges(reader, generation: generation)
                 overview = snapshot
@@ -341,6 +419,7 @@ final class ArchiveModel: ObservableObject {
                     }
                     if self.canSync { try await self.checkArrivals(reader, generation: generation) }
                     self.checkStartTimeout()
+                    self.expireTyping()
                     version = current
                     try await Task.sleep(for: .seconds(1))
                 } catch is CancellationError { return }

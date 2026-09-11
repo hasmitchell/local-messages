@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ConversationDetail: View {
     @EnvironmentObject private var model: ArchiveModel
@@ -22,6 +23,7 @@ struct ConversationDetail: View {
         return digitsA.hasSuffix(String(digitsB.suffix(8))) || digitsB.hasSuffix(String(digitsA.suffix(8)))
     }
 
+    @State private var dropTargeted = false
     var body: some View {
         VStack(spacing: 0) {
             if model.loadingMessages {
@@ -35,6 +37,31 @@ struct ConversationDetail: View {
         }
         .overlay(alignment: .topTrailing) {
             if model.showingThreadSearch && !model.threadQuery.trimmingCharacters(in: .whitespaces).isEmpty { ThreadResultsPanel() }
+        }
+        .overlay {
+            if dropTargeted {
+                ZStack {
+                    Rectangle().fill(archiveAccent.opacity(0.08))
+                    VStack(spacing: 8) {
+                        Image(systemName: "paperclip.circle.fill").font(.system(size: 40)).foregroundStyle(archiveAccent)
+                        Text("Drop to attach").font(.headline)
+                    }
+                    .padding(24).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                }
+                .allowsHitTesting(false)
+            }
+        }
+        // Files dropped anywhere on the conversation are staged as attachments.
+        .onDrop(of: [.fileURL], isTargeted: $dropTargeted) { providers in
+            guard model.canSync else { return false }
+            for provider in providers {
+                provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier) { item, _ in
+                    let url = (item as? URL) ?? (item as? Data).flatMap { URL(dataRepresentation: $0, relativeTo: nil) }
+                    guard let url else { return }
+                    Task { @MainActor in model.attach([url]) }
+                }
+            }
+            return true
         }
         .navigationTitle(conversation.title)
         .navigationSubtitle(subtitle)
@@ -139,6 +166,7 @@ private struct MessageTimeline: View {
                         Text("Reaction \(pending.command?.emoji ?? "") · \(pending.label)").font(.caption)
                             .foregroundStyle(pending.state == "unknown" || pending.state == "failed" ? .orange : .secondary).padding(.top, 8)
                     }
+                    if !model.hasLater && model.isTyping(conversation.id) { TypingIndicator() }
                     if model.hasLater {
                         LoadMoreButton(title: "Show Later Messages") { model.loadMore(earlier: false) }.disabled(model.paging).padding(.top, 14)
                     }
@@ -188,6 +216,29 @@ private struct MessageTimeline: View {
 private struct TimelineBottomPreference: PreferenceKey {
     static let defaultValue: CGFloat = .infinity
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+}
+
+// Three pulsing dots in an incoming bubble while the other side types.
+private struct TypingIndicator: View {
+    @State private var phase = 0
+    var body: some View {
+        HStack(spacing: 5) {
+            ForEach(0..<3, id: \.self) { index in
+                Circle().fill(Color.secondary).frame(width: 7, height: 7).opacity(phase == index ? 1 : 0.35)
+            }
+        }
+        .padding(.horizontal, 14).padding(.vertical, 12)
+        .background(incomingBubble, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.top, 8)
+        .accessibilityLabel("Typing")
+        .task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(380))
+                withAnimation(.easeInOut(duration: 0.3)) { phase = (phase + 1) % 3 }
+            }
+        }
+    }
 }
 
 private struct TimelineSeparator: View {
@@ -263,6 +314,9 @@ private struct MessageBubble: View {
         }
         .padding(.top, first ? 8 : 2)
         .padding(.bottom, message.reactions.isEmpty ? 0 : 12)
+        // The whole row, including the empty space beside the bubble, keeps the
+        // hover controls visible while the pointer travels to them.
+        .contentShape(Rectangle())
         .onHover { hovering = $0 }
     }
 
@@ -308,6 +362,7 @@ private struct MessageBubble: View {
             if !message.reactions.isEmpty { ReactionBadges(reactions: message.reactions).padding(.horizontal, 8).offset(y: 11) }
         }
         .contextMenu {
+            if model.canSync { Button("Reply") { model.setReplyTarget(message) }.disabled(model.draft.submissionID != nil) }
             if !message.outgoing { Menu("React") { reactionItems }.disabled(!model.canReact(message)) }
             if !message.body.isEmpty {
                 Button("Copy Text") {

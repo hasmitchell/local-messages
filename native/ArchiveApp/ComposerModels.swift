@@ -4,6 +4,7 @@ struct DraftRecord: Codable, Sendable, Equatable {
     var body = ""
     var submissionID: String?
     var files: [DraftAttachment]?
+    var replyTo: String?
     var attachments: [DraftAttachment] { files ?? [] }
 }
 actor DraftRepository {
@@ -42,7 +43,8 @@ struct SendCommand: Codable, Sendable, Hashable {
     var messageID: String? = nil
     var emoji: String? = nil
     var number: String? = nil
-    enum CodingKeys: String, CodingKey { case kind, id, body, connection, files, emoji, number; case conversationID = "conversation_id", messageID = "message_id" }
+    var replyTo: String? = nil
+    enum CodingKeys: String, CodingKey { case kind, id, body, connection, files, emoji, number; case conversationID = "conversation_id", messageID = "message_id", replyTo = "reply_to" }
     /// Digits with an optional leading +, as the worker requires; nil when the text is not a phone number.
     static func normalizedNumber(_ text: String) -> String? {
         var cleaned = text.filter { !" -().\u{00A0}".contains($0) }

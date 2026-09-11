@@ -27,7 +27,7 @@ struct ArchiveSidebar: View {
             List(selection: Binding(get: { model.selectedID }, set: { if let id = $0 { model.select(id) } })) {
                 Section {
                     ForEach(model.visibleConversations) { conversation in
-                        ConversationRow(conversation: conversation, unread: model.isUnread(conversation), draft: model.drafts[conversation.id], avatar: model.avatarURL(conversation))
+                        ConversationRow(conversation: conversation, unread: model.isUnread(conversation), draft: model.drafts[conversation.id], avatar: model.avatarURL(conversation), typing: model.isTyping(conversation.id))
                             .tag(conversation.id).id(conversation.id)
                             .listRowInsets(EdgeInsets(top: 4, leading: 8, bottom: 4, trailing: 10))
                     }
@@ -124,6 +124,7 @@ private struct ConversationRow: View {
     let unread: Bool
     let draft: DraftRecord?
     let avatar: URL?
+    let typing: Bool
     private var hasDraft: Bool { draft.map { !$0.body.isEmpty || !$0.attachments.isEmpty } == true && draft?.submissionID == nil }
 
     var body: some View {
@@ -137,7 +138,9 @@ private struct ConversationRow: View {
                     Spacer(minLength: 4)
                     Text(RelativeDate.list(conversation.date)).font(.system(size: 11)).foregroundStyle(unread ? archiveAccent : .secondary)
                 }
-                if hasDraft, let draft {
+                if typing {
+                    Text("Typing…").font(.system(size: 12)).italic().foregroundStyle(archiveAccent)
+                } else if hasDraft, let draft {
                     HStack(spacing: 4) {
                         Image(systemName: "pencil").font(.system(size: 10, weight: .semibold))
                         Text(verbatim: draft.body.isEmpty ? "Draft with \(draft.attachments.count == 1 ? "an attachment" : "\(draft.attachments.count) attachments")" : "Draft: " + draft.body.replacingOccurrences(of: "\n", with: " "))
