@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+task_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$task_root"
+mkdir -p build .cache/swift-modules
+swiftc -parse-as-library -module-cache-path .cache/swift-modules \
+  native/AccountHelper.swift -o build/gm-account-helper
+./scripts/go build -tags libsqlite3 -o build/gmprobe ./cmd/gmprobe

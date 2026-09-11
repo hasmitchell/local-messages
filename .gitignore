@@ -1,0 +1,10 @@
+.cache/
+.local-data/
+build/
+.DS_Store
+*.db
+*.db-shm
+*.db-wal
+cookies.json
+session.json
+

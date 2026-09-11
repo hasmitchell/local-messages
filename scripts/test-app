@@ -1,0 +1,19 @@
+#!/bin/sh
+set -eu
+task_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$task_root"
+mkdir -p .cache/swift-modules build
+task_fixture=$(mktemp -d "$task_root/.cache/ui-tests.XXXXXX")
+trap 'rm -rf "$task_fixture"' EXIT
+python3 native/ArchiveAppTests/make_fixture.py "$task_fixture"
+swiftc -D ARCHIVE_TESTING -swift-version 6 -parse-as-library -module-cache-path .cache/swift-modules \
+  native/ArchiveApp/Models.swift native/ArchiveApp/ComposerModels.swift native/ArchiveApp/DraftAttachments.swift native/ArchiveApp/ArchiveSettings.swift native/ArchiveApp/ArchiveStorage.swift native/ArchiveApp/SharedContacts.swift native/ArchiveApp/ArchiveDatabase.swift \
+  native/ArchiveAppTests/ArchiveTests.swift -lsqlite3 -o build/gm-archive-tests
+build/gm-archive-tests "$task_fixture"
+swiftc -swift-version 6 -parse-as-library -module-cache-path .cache/swift-modules \
+  native/ArchiveApp/RelinkController.swift native/ArchiveAppTests/RelinkTests.swift -o build/gm-relink-tests
+build/gm-relink-tests
+swiftc -swift-version 6 -parse-as-library -module-cache-path .cache/swift-modules \
+  native/ArchiveApp/Accounts.swift native/ArchiveApp/SyncController.swift native/ArchiveApp/ComposerModels.swift native/ArchiveApp/DraftAttachments.swift native/ArchiveApp/ArchiveSettings.swift \
+  native/ArchiveAppTests/AccountsTests.swift -o build/gm-account-tests
+build/gm-account-tests

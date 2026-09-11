@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+task_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$task_root"
+if [ ! -x build/gmprobe ] || [ ! -x build/gm-account-helper ]; then
+  ./scripts/build
+fi
+exec build/gmprobe "$@"
+

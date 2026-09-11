@@ -1,0 +1,48 @@
+#!/bin/sh
+set -eu
+task_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$task_root"
+task_app="build/Local Messages.app"
+# Build into a staging bundle and swap it in at the end, so an already running
+# copy of the app keeps its own files until it is relaunched.
+task_staging="build/.staging/Local Messages.app"
+rm -rf build/.staging
+mkdir -p "$task_staging/Contents/MacOS" "$task_staging/Contents/Resources" .cache/swift-modules
+./scripts/go build -tags libsqlite3 -o "$task_staging/Contents/MacOS/gmprobe" ./cmd/gmprobe
+if [ ! -x build/gm-account-helper ]; then
+  swiftc -parse-as-library -module-cache-path .cache/swift-modules native/AccountHelper.swift -o build/gm-account-helper
+fi
+cp build/gm-account-helper "$task_staging/Contents/MacOS/gm-account-helper"
+swiftc -swift-version 6 -parse-as-library -O -module-cache-path .cache/swift-modules \
+  -target "$(uname -m)-apple-macos14.0" native/ArchiveApp/*.swift \
+  -lsqlite3 -o "$task_staging/Contents/MacOS/Local Messages"
+swiftc -module-cache-path .cache/swift-modules native/ArchiveAppIcon.swift -o build/gm-app-icon
+build/gm-app-icon .cache/LocalMessages.iconset
+iconutil -c icns .cache/LocalMessages.iconset -o "$task_staging/Contents/Resources/AppIcon.icns"
+cat > "$task_staging/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleIdentifier</key><string>local.GoogleMessagingAppMac.viewer</string>
+  <key>CFBundleName</key><string>Local Messages</string>
+  <key>CFBundleDisplayName</key><string>Local Messages</string>
+  <key>CFBundleExecutable</key><string>Local Messages</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>0.7.0</string>
+  <key>CFBundleVersion</key><string>10</string>
+  <key>LSMinimumSystemVersion</key><string>14.0</string>
+  <key>NSHighResolutionCapable</key><true/>
+  <key>NSPrincipalClass</key><string>NSApplication</string>
+  <key>NSHumanReadableCopyright</key><string>Local Messages contributors. AGPL-3.0.</string>
+</dict></plist>
+PLIST
+codesign --force --sign - "$task_staging"
+rm -rf "build/.previous.app"
+if [ -d "$task_app" ]; then mv "$task_app" "build/.previous.app"; fi
+mv "$task_staging" "$task_app"
+rm -rf "build/.previous.app" build/.staging
+printf '%s\n' "Built $task_app"
+if pgrep -f "$task_root/$task_app/Contents/MacOS/Local Messages" >/dev/null 2>&1; then
+  printf '%s\n' "Local Messages is running with the previous build; quit and reopen it to use this one."
+fi

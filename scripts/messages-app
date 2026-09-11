@@ -1,0 +1,12 @@
+#!/bin/sh
+set -eu
+task_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$task_root"
+if [ ! -x "build/Local Messages.app/Contents/MacOS/Local Messages" ]; then
+  ./scripts/build-app
+fi
+if [ "$#" -eq 0 ]; then
+  exec open "build/Local Messages.app" --args --default-archive "$task_root/.local-data/live"
+fi
+task_archive=$(CDPATH= cd -- "$1" && pwd)
+exec open "build/Local Messages.app" --args --archive "$task_archive"
