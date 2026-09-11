@@ -220,4 +220,4 @@ The importer preserves older locally imported rows if the cutoff is later narrow
 
 ## Licence
 
-This prototype is AGPL-3.0, matching the core `mautrix/gmessages` dependency. See [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Nothing has been published. Review the complete distribution and dependency licence obligations before a release.
+This prototype is AGPL-3.0, matching the core `mautrix/gmessages` dependency. See [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The source is published at [github.com/hasmitchell/local-messages](https://github.com/hasmitchell/local-messages); no binaries are distributed. Review the complete distribution and dependency licence obligations before a binary release.
