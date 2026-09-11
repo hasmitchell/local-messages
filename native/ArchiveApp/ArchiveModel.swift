@@ -453,8 +453,12 @@ final class ArchiveModel: ObservableObject {
             // Capture the position before adding rows changes the scrollable
             // height. Apply the rows and their scroll request in one UI update.
             let shouldFollow = following && timelineAtBottom
-            apply(window)
-            outbox = pending
+            if shouldFollow && (window.messages.count != messages.count || pending.count != outbox.count) {
+                withAnimation(Motion.spring) { apply(window); outbox = pending }
+            } else {
+                apply(window)
+                outbox = pending
+            }
             if shouldFollow {
                 scrollRequest = ScrollRequest(messageID: "timeline-bottom", atBottom: true)
                 if windowIsKey && NSApp.isActive { markVisibleAsSeen() }

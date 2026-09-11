@@ -59,7 +59,7 @@ struct NewMessageView: View {
                 if waiting { ProgressView().controlSize(.small) }
                 Spacer()
                 Button("Cancel") { model.pendingStart = nil; dismiss() }.keyboardShortcut(.cancelAction)
-                Button("Start", action: startTyped).buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
+                Button("Start", action: startTyped).prominentButton().keyboardShortcut(.defaultAction)
                     .disabled(!valid || !model.canStartConversation)
             }
         }

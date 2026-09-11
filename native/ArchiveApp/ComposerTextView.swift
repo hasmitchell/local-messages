@@ -138,23 +138,31 @@ final class ComposerNSTextView: NSTextView {
 
     private func carriesAttachments(_ pasteboard: NSPasteboard) -> Bool {
         pasteboard.canReadObject(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true])
-            || (pasteboard.string(forType: .string) == nil && (pasteboard.data(forType: .png) != nil || pasteboard.data(forType: .tiff) != nil))
+            || pasteboard.canReadObject(forClasses: [NSImage.self], options: nil)
     }
+    // Files first; otherwise any image the system can read (screenshot tools
+    // vary in the types they offer, and some add a text flavour as well).
     private func handleAttachments(from pasteboard: NSPasteboard) -> Bool {
         if let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL], !urls.isEmpty {
             attachFiles?(urls)
             return true
         }
-        guard pasteboard.string(forType: .string) == nil else { return false }
-        if let png = pasteboard.data(forType: .png) {
-            attachData?(png, "Pasted image.png")
-            return true
-        }
-        if let tiff = pasteboard.data(forType: .tiff), let bitmap = NSBitmapImageRep(data: tiff),
-           let png = bitmap.representation(using: .png, properties: [:]) {
+        if let png = PastedImage.png(from: pasteboard) {
             attachData?(png, "Pasted image.png")
             return true
         }
         return false
+    }
+}
+
+enum PastedImage {
+    static func png(from pasteboard: NSPasteboard) -> Data? {
+        if let png = pasteboard.data(forType: .png) { return png }
+        guard let image = (pasteboard.readObjects(forClasses: [NSImage.self], options: nil) as? [NSImage])?.first else { return nil }
+        return png(from: image)
+    }
+    static func png(from image: NSImage) -> Data? {
+        guard let tiff = image.tiffRepresentation, let bitmap = NSBitmapImageRep(data: tiff) else { return nil }
+        return bitmap.representation(using: .png, properties: [:])
     }
 }

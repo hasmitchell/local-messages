@@ -14,6 +14,38 @@ let archiveAccent = Color(nsColor: NSColor(name: nil) { appearance in
         ? NSColor(srgbRed: 0.34, green: 0.81, blue: 0.71, alpha: 1)
         : NSColor(srgbRed: 0.08, green: 0.43, blue: 0.38, alpha: 1)
 })
+// Fill for prominent buttons: dark enough for white text in both appearances.
+let archiveProminent = Color(nsColor: NSColor(name: nil) { appearance in
+    appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        ? NSColor(srgbRed: 0.07, green: 0.44, blue: 0.38, alpha: 1)
+        : NSColor(srgbRed: 0.08, green: 0.43, blue: 0.38, alpha: 1)
+})
+
+extension View {
+    /// The app's prominent button: teal fill with readable white text.
+    func prominentButton() -> some View { buttonStyle(.borderedProminent).tint(archiveProminent) }
+}
+
+// One vocabulary of motion for the whole app.
+enum Motion {
+    static let spring = Animation.spring(response: 0.38, dampingFraction: 0.78)
+    static let quick = Animation.spring(response: 0.26, dampingFraction: 0.82)
+    static let bouncy = Animation.spring(response: 0.32, dampingFraction: 0.55)
+}
+
+// Icon buttons that squash on press and spring back.
+struct BouncyButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.86 : 1)
+            .opacity(configuration.isPressed ? 0.8 : 1)
+            .animation(Motion.bouncy, value: configuration.isPressed)
+    }
+}
+extension ButtonStyle where Self == BouncyButtonStyle {
+    static var bouncy: BouncyButtonStyle { BouncyButtonStyle() }
+}
+
 let incomingBubble = Color(nsColor: NSColor(name: nil) { appearance in
     appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
         ? NSColor(white: 1, alpha: 0.13)

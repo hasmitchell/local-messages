@@ -70,7 +70,7 @@ struct AccountsView: View {
                         Text("Only the selected account syncs and shows notifications. Switch back to browse its saved history and catch up.")
                             .font(.callout).foregroundStyle(.secondary)
                         ForEach(model.accounts) { profile in AccountProfileRow(profile: profile) }
-                        Button("Add Account…", action: model.prepareNewAccount).buttonStyle(.borderedProminent)
+                        Button("Add Account…", action: model.prepareNewAccount).prominentButton()
                     }.padding(22)
                 }.frame(maxHeight: 420)
             }
@@ -101,7 +101,7 @@ struct AccountsView: View {
                     Button("Cancel", action: pairing.cancel).disabled(pairing.state == .cancelling)
                 } else if pairing.state != .complete {
                     Button(pairing.state == .ready ? "Sign In & Pair…" : "Try Again…") { model.addAccount(named: setupName) }
-                        .buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
+                        .prominentButton().keyboardShortcut(.defaultAction)
                         .disabled(!AccountStore.validName(setupName) || model.savingSettings || model.stagingAttachments || !model.accountListAvailable)
                 }
             }

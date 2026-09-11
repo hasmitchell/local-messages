@@ -38,6 +38,7 @@ struct ConversationDetail: View {
         .overlay(alignment: .topTrailing) {
             if model.showingThreadSearch && !model.threadQuery.trimmingCharacters(in: .whitespaces).isEmpty { ThreadResultsPanel() }
         }
+        .animation(Motion.quick, value: model.showingThreadSearch && !model.threadQuery.isEmpty)
         .overlay {
             if dropTargeted {
                 ZStack {
@@ -47,18 +48,28 @@ struct ConversationDetail: View {
                         Text("Drop to attach").font(.headline)
                     }
                     .padding(24).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .transition(.scale(scale: 0.85).combined(with: .opacity))
                 }
                 .allowsHitTesting(false)
+                .transition(.opacity)
             }
         }
-        // Files dropped anywhere on the conversation are staged as attachments.
-        .onDrop(of: [.fileURL], isTargeted: $dropTargeted) { providers in
+        .animation(Motion.quick, value: dropTargeted)
+        // Files or images dropped anywhere on the conversation are staged as attachments.
+        .onDrop(of: [.fileURL, .image], isTargeted: $dropTargeted) { providers in
             guard model.canSync else { return false }
             for provider in providers {
-                provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier) { item, _ in
-                    let url = (item as? URL) ?? (item as? Data).flatMap { URL(dataRepresentation: $0, relativeTo: nil) }
-                    guard let url else { return }
-                    Task { @MainActor in model.attach([url]) }
+                if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
+                    provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier) { item, _ in
+                        let url = (item as? URL) ?? (item as? Data).flatMap { URL(dataRepresentation: $0, relativeTo: nil) }
+                        guard let url else { return }
+                        Task { @MainActor in model.attach([url]) }
+                    }
+                } else if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
+                    provider.loadDataRepresentation(forTypeIdentifier: UTType.image.identifier) { data, _ in
+                        guard let data, let image = NSImage(data: data), let png = PastedImage.png(from: image) else { return }
+                        Task { @MainActor in model.attachData(png, suggestedName: "Dropped image.png") }
+                    }
                 }
             }
             return true
@@ -167,6 +178,7 @@ private struct MessageTimeline: View {
                             .foregroundStyle(pending.state == "unknown" || pending.state == "failed" ? .orange : .secondary).padding(.top, 8)
                     }
                     if !model.hasLater && model.isTyping(conversation.id) { TypingIndicator() }
+                    Color.clear.frame(height: 0).animation(Motion.spring, value: model.isTyping(conversation.id))
                     if model.hasLater {
                         LoadMoreButton(title: "Show Later Messages") { model.loadMore(earlier: false) }.disabled(model.paging).padding(.top, 14)
                     }
@@ -193,8 +205,11 @@ private struct MessageTimeline: View {
                         .shadow(color: .black.opacity(0.14), radius: 5, y: 2)
                         .padding(14).help("Jump to latest messages")
                         .accessibilityLabel("Jump to latest messages").accessibilityIdentifier("messagesToBottom")
+                        .transition(.scale(scale: 0.5, anchor: .bottomTrailing).combined(with: .opacity))
                 }
             }
+            .animation(Motion.quick, value: model.timelineAtBottom)
+            .animation(Motion.quick, value: model.hasLater)
             .onPreferenceChange(TimelineBottomPreference.self) { bottom in
                 if #unavailable(macOS 15) { model.timelineAtBottom = bottom >= 0 && bottom <= geometry.size.height + 60 }
             }
@@ -224,18 +239,21 @@ private struct TypingIndicator: View {
     var body: some View {
         HStack(spacing: 5) {
             ForEach(0..<3, id: \.self) { index in
-                Circle().fill(Color.secondary).frame(width: 7, height: 7).opacity(phase == index ? 1 : 0.35)
+                Circle().fill(Color.secondary).frame(width: 7, height: 7)
+                    .opacity(phase == index ? 1 : 0.4)
+                    .offset(y: phase == index ? -4 : 0)
             }
         }
         .padding(.horizontal, 14).padding(.vertical, 12)
         .background(incomingBubble, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.top, 8)
+        .transition(.move(edge: .bottom).combined(with: .opacity).combined(with: .scale(scale: 0.8, anchor: .bottomLeading)))
         .accessibilityLabel("Typing")
         .task {
             while !Task.isCancelled {
-                try? await Task.sleep(for: .milliseconds(380))
-                withAnimation(.easeInOut(duration: 0.3)) { phase = (phase + 1) % 3 }
+                try? await Task.sleep(for: .milliseconds(330))
+                withAnimation(Motion.bouncy) { phase = (phase + 1) % 3 }
             }
         }
     }
@@ -318,12 +336,15 @@ private struct MessageBubble: View {
         // hover controls visible while the pointer travels to them.
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
+        .transition(.asymmetric(
+            insertion: .move(edge: .bottom).combined(with: .opacity).combined(with: .scale(scale: 0.92, anchor: message.outgoing ? .bottomTrailing : .bottomLeading)),
+            removal: .opacity))
     }
 
     // Time, transport and reaction controls sit beside the bubble without taking part in its layout.
     private var sideDetails: some View {
         HStack(spacing: 6) {
-            if message.outgoing { hoverDetail } else { reactButton; hoverDetail }
+            if message.outgoing { hoverDetail; replyButton } else { reactButton; replyButton; hoverDetail }
         }
         .fixedSize()
         .alignmentGuide(message.outgoing ? .leading : .trailing) { dimensions in
@@ -341,7 +362,20 @@ private struct MessageBubble: View {
         }
         .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
         .opacity(hovering && model.canReact(message) ? 1 : 0)
+        .scaleEffect(hovering ? 1 : 0.7)
+        .animation(Motion.quick, value: hovering)
         .accessibilityLabel("React to message")
+    }
+    private var replyButton: some View {
+        Button { model.setReplyTarget(message) } label: {
+            Image(systemName: "arrowshape.turn.up.left").font(.system(size: 13, weight: .medium)).foregroundStyle(.secondary).frame(width: 20, height: 20)
+        }
+        .buttonStyle(.bouncy)
+        .opacity(hovering && model.canSync && model.draft.submissionID == nil ? 1 : 0)
+        .scaleEffect(hovering ? 1 : 0.7)
+        .animation(Motion.quick, value: hovering)
+        .help("Reply")
+        .accessibilityLabel("Reply to message")
     }
     @ViewBuilder private var reactionItems: some View {
         ForEach(quickReactions, id: \.self) { emoji in Button(emoji) { model.react(message, emoji: emoji) } }
@@ -359,8 +393,12 @@ private struct MessageBubble: View {
         .background(imageOnly ? Color.clear : (message.outgoing ? archiveBubble : incomingBubble), in: shape)
         .overlay(shape.strokeBorder(highlighted ? archiveAccent : .clear, lineWidth: 2))
         .overlay(alignment: message.outgoing ? .bottomLeading : .bottomTrailing) {
-            if !message.reactions.isEmpty { ReactionBadges(reactions: message.reactions).padding(.horizontal, 8).offset(y: 11) }
+            if !message.reactions.isEmpty {
+                ReactionBadges(reactions: message.reactions).padding(.horizontal, 8).offset(y: 11)
+                    .transition(.scale(scale: 0.3, anchor: message.outgoing ? .bottomLeading : .bottomTrailing).combined(with: .opacity))
+            }
         }
+        .animation(Motion.bouncy, value: message.reactions)
         .contextMenu {
             if model.canSync { Button("Reply") { model.setReplyTarget(message) }.disabled(model.draft.submissionID != nil) }
             if !message.outgoing { Menu("React") { reactionItems }.disabled(!model.canReact(message)) }
@@ -497,6 +535,7 @@ struct OutboxBubble: View {
         }
         .padding(.top, 8).padding(.leading, max(24, spare)).frame(maxWidth: .infinity, alignment: .trailing)
         .id("outbox-" + message.id)
+        .transition(.asymmetric(insertion: .move(edge: .bottom).combined(with: .opacity).combined(with: .scale(scale: 0.9, anchor: .bottomTrailing)), removal: .opacity))
     }
 }
 
@@ -544,6 +583,7 @@ private struct ThreadResultsPanel: View {
         .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(.quaternary, lineWidth: 1))
         .shadow(color: .black.opacity(0.18), radius: 12, y: 4)
         .padding(10)
+        .transition(.move(edge: .top).combined(with: .opacity))
         .accessibilityIdentifier("threadSearchResults")
     }
 }

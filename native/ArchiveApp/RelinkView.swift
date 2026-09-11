@@ -31,7 +31,7 @@ struct RelinkView: View {
                     Button("Done") { dismiss() }.keyboardShortcut(.cancelAction)
                     if controller.state != .complete {
                         Button(controller.state == .ready ? "Sign In & Reconnect…" : "Try Again…") { model.reconnectArchive() }
-                            .buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
+                            .prominentButton().keyboardShortcut(.defaultAction)
                     }
                 }
             }

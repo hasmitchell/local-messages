@@ -58,11 +58,11 @@ struct ContactPreview: View {
                     Spacer()
                     if importing { ProgressView().controlSize(.small) }
                     if let googleContainer {
-                        Button("Add to Google Contacts") { add(to: googleContainer) }.buttonStyle(.borderedProminent).disabled(contacts == nil || importing)
+                        Button("Add to Google Contacts") { add(to: googleContainer) }.prominentButton().disabled(contacts == nil || importing)
                             .help("Saves into the \(googleContainer.name) account in macOS Contacts, which syncs to your phone")
                     }
                     if googleContainer == nil {
-                        Button("Add to Contacts") { add(to: nil) }.buttonStyle(.borderedProminent).disabled(contacts == nil || importing)
+                        Button("Add to Contacts") { add(to: nil) }.prominentButton().disabled(contacts == nil || importing)
                     } else {
                         Button("Add to Contacts (local)") { add(to: nil) }.disabled(contacts == nil || importing)
                     }

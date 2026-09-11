@@ -23,20 +23,22 @@ struct MessageComposer: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            if model.draft.replyTo != nil { ReplyStrip() }
-            if !model.draft.attachments.isEmpty { AttachmentStrip() }
+            if model.draft.replyTo != nil { ReplyStrip().transition(.move(edge: .bottom).combined(with: .opacity)) }
+            if !model.draft.attachments.isEmpty { AttachmentStrip().transition(.move(edge: .bottom).combined(with: .opacity)) }
             HStack(alignment: .bottom, spacing: 4) {
                 Button { choosingFiles = true } label: {
                     Image(systemName: "paperclip").font(.system(size: 15, weight: .medium)).frame(width: 28, height: 28).contentShape(Rectangle())
                 }
-                .buttonStyle(.plain).foregroundStyle(.secondary)
+                .buttonStyle(.bouncy).foregroundStyle(.secondary)
                 .disabled(model.draft.submissionID != nil || model.stagingAttachments)
                 .help("Attach photos or files").accessibilityLabel("Attach files")
                 editor
                 Button(action: model.sendDraft) {
                     Image(systemName: "arrow.up.circle.fill").font(.system(size: 24)).frame(width: 28, height: 28)
                 }
-                .buttonStyle(.plain).foregroundStyle(model.canSendDraft ? archiveAccent : Color.secondary.opacity(0.45))
+                .buttonStyle(.bouncy).foregroundStyle(model.canSendDraft ? archiveAccent : Color.secondary.opacity(0.45))
+                .scaleEffect(model.canSendDraft ? 1 : 0.9)
+                .animation(Motion.bouncy, value: model.canSendDraft)
                 .disabled(!model.canSendDraft).accessibilityLabel("Send message").help("Send (⌘Return). Return adds a new line.")
                 .keyboardShortcut(.return, modifiers: .command)
             }
@@ -54,6 +56,9 @@ struct MessageComposer: View {
             }
         }
         .padding(.horizontal, 14).padding(.top, 8).padding(.bottom, 10)
+        .animation(Motion.quick, value: model.draft.replyTo)
+        .animation(Motion.quick, value: model.draft.attachments.count)
+        .animation(Motion.quick, value: model.composerError)
         .fileImporter(isPresented: $choosingFiles, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
             if case .success(let urls) = result { model.attach(urls) }
         }

@@ -45,6 +45,7 @@ struct ArchiveSidebar: View {
             .modifier(ScrollEdgeObserver(edge: .top) { awayFromTop = !$0 })
             .onAppear { if #unavailable(macOS 15) { awayFromTop = true } }
             .listStyle(.sidebar).scrollContentBackground(.hidden)
+            .animation(Motion.spring, value: model.visibleConversations.map(\.id))
             .overlay {
                 if model.visibleConversations.isEmpty && !model.loading {
                     ContentUnavailableView(model.overview == nil ? "No Archive Open" : model.filter == .archived ? "No Archived Conversations" : "No Conversations", systemImage: "tray")
@@ -129,7 +130,9 @@ private struct ConversationRow: View {
 
     var body: some View {
         HStack(alignment: .center, spacing: 8) {
-            Circle().fill(archiveAccent).frame(width: 8, height: 8).opacity(unread ? 1 : 0)
+            Circle().fill(archiveAccent).frame(width: 8, height: 8)
+                .opacity(unread ? 1 : 0).scaleEffect(unread ? 1 : 0.3)
+                .animation(Motion.bouncy, value: unread)
                 .accessibilityLabel(unread ? "Unread" : "")
             Avatar(name: conversation.title, size: 38, group: conversation.isGroup, imageURL: avatar)
             VStack(alignment: .leading, spacing: 2) {

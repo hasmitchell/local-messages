@@ -78,7 +78,7 @@ private struct ArchiveWelcome: View {
             else {
                 HStack(spacing: 12) {
                     Button("Open Saved Archive…", action: model.chooseArchive).controlSize(.large)
-                    Button("Add Google Account…", action: model.prepareNewAccount).buttonStyle(.borderedProminent).controlSize(.large)
+                    Button("Add Google Account…", action: model.prepareNewAccount).prominentButton().controlSize(.large)
                 }.padding(.top, 8)
             }
         }.padding(40).frame(maxWidth: .infinity, maxHeight: .infinity)
