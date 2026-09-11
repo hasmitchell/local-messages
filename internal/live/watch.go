@@ -207,6 +207,9 @@ func runSession(ctx context.Context, store *archive.Store, client source, buffer
 				}
 			}
 			nextInventory = time.Now().Add(2 * time.Minute)
+			if err := refreshAvatars(ctx, store, client, avatarBatchLimit); err != nil {
+				return err
+			}
 		}
 		if len(retryDirty) > 0 {
 			emit("catching_up")

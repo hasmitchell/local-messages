@@ -211,9 +211,25 @@ func ConvertConversation(raw *gmproto.Conversation, folder string) archive.Conve
 	}
 	var participants []archive.Participant
 	for _, p := range raw.GetParticipants() {
-		participants = append(participants, archive.Participant{ID: p.GetID().GetParticipantID(), Name: p.GetFullName(), Number: p.GetID().GetNumber(), IsMe: p.GetIsMe()})
+		participants = append(participants, archive.Participant{ID: p.GetID().GetParticipantID(), Name: p.GetFullName(), Number: p.GetID().GetNumber(), IsMe: p.GetIsMe(), ContactID: p.GetContactID()})
 	}
 	return archive.Conversation{ID: raw.GetConversationID(), Name: name, Folder: folder, LastMessage: time.UnixMicro(raw.GetLastMessageTimestamp()).UTC(), Unread: raw.GetUnread(), Participants: participants}
+}
+
+// ParticipantThumbnails returns the phone's contact photo for each participant
+// ID that has one; participants without a photo are absent from the result.
+func (c *Client) ParticipantThumbnails(ctx context.Context, ids []string) (map[string][]byte, error) {
+	resp, err := c.GM.GetParticipantThumbnail(ctx, ids...)
+	if err != nil {
+		return nil, err
+	}
+	photos := make(map[string][]byte, len(ids))
+	for _, thumb := range resp.GetThumbnail() {
+		if data := thumb.GetData().GetImageBuffer(); len(data) > 0 {
+			photos[thumb.GetIdentifier()] = data
+		}
+	}
+	return photos, nil
 }
 
 func (c *Client) Lookup(ctx context.Context, id string) (archive.Conversation, bool, error) {

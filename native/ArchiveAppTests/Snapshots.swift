@@ -54,7 +54,7 @@ enum SnapshotRunner {
         switch scenario {
         case "search": model.query = "booking"
         case "thread":
-            model.toggleThreadSearch()
+            model.showingThreadSearch = true
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { model.threadQuery = "booking" }
         case "info": model.showingDetails = true
         case "settings", "settings-general", "settings-notifications", "settings-connection", "settings-history":

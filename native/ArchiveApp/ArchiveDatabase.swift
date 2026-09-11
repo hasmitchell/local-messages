@@ -141,7 +141,16 @@ actor ArchiveDatabase {
         return try window(messages, conversation: conversation)
     }
 
+    private func avatarPaths() throws -> [String: String] {
+        guard try hasTable("participant_avatars") else { return [:] }
+        let rows = try ReadStatement(connection, "SELECT participant_id,path FROM participant_avatars WHERE path!=''")
+        var paths: [String: String] = [:]
+        while try rows.next() { paths[rows.text(0)] = rows.text(1) }
+        return paths
+    }
+
     func overview() throws -> ArchiveOverview {
+        let avatars = try avatarPaths()
         let details = try hasTable("conversation_details") ? "(SELECT payload FROM conversation_details d WHERE d.id=c.id)" : "NULL"
         let rows = try ReadStatement(connection, """
             SELECT c.id,c.name,c.folder,c.last_message,
@@ -156,7 +165,11 @@ actor ArchiveDatabase {
             let preview: String
             if payload.isEmpty { preview = "No messages in the saved date range" }
             else { preview = try decoder.decode(MessageRecord.self, from: payload).preview }
-            conversations.append(ConversationRecord(id: rows.text(0), name: rows.text(1), folder: rows.text(2), timestamp: rows.integer(3), preview: preview, messageCount: Int(rows.integer(4)), unread: rows.integer(7) != 0, participants: (try? decoder.decode([ConversationParticipant].self, from: rows.data(6))) ?? []))
+            var participants = (try? decoder.decode([ConversationParticipant].self, from: rows.data(6))) ?? []
+            if !avatars.isEmpty {
+                for index in participants.indices { participants[index].avatarPath = avatars[participants[index].id] }
+            }
+            conversations.append(ConversationRecord(id: rows.text(0), name: rows.text(1), folder: rows.text(2), timestamp: rows.integer(3), preview: preview, messageCount: Int(rows.integer(4)), unread: rows.integer(7) != 0, participants: participants))
         }
         let stats = try ReadStatement(connection, "SELECT count(*),coalesce(max(timestamp),0) FROM messages")
         guard try stats.next() else { throw ArchiveFailure.reading }

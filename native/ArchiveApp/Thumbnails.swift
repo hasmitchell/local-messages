@@ -2,12 +2,12 @@ import AppKit
 import ImageIO
 import SwiftUI
 
-private final class CachedImage: @unchecked Sendable {
+final class CachedImage: @unchecked Sendable {
     let image: CGImage
     init(_ image: CGImage) { self.image = image }
 }
 
-private actor ThumbnailStore {
+actor ThumbnailStore {
     static let shared = ThumbnailStore()
     private let cache = NSCache<NSURL, CachedImage>()
     init() { cache.totalCostLimit = 48 * 1024 * 1024 }

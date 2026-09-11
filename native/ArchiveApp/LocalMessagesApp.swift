@@ -26,7 +26,7 @@ struct LocalMessagesApp: App {
             }
             CommandGroup(after: .textEditing) {
                 Divider()
-                Button("Find in Conversation") { if !model.showingThreadSearch { model.toggleThreadSearch() } else { model.focusThreadSearch = UUID() } }
+                Button("Find in Conversation") { model.showingThreadSearch = true }
                     .keyboardShortcut("f").disabled(model.selectedID == nil)
                 Button("Search All Messages") { model.focusSearch = UUID() }.keyboardShortcut("f", modifiers: [.command, .shift])
             }

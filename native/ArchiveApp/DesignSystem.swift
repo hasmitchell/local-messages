@@ -29,6 +29,8 @@ struct Avatar: View {
     let name: String
     let size: CGFloat
     var group = false
+    var imageURL: URL? = nil
+    @State private var photo: CGImage?
 
     private var letters: String {
         let words = name.split(separator: " ").filter { $0.first?.isLetter == true }
@@ -46,10 +48,20 @@ struct Avatar: View {
     var body: some View {
         ZStack {
             Circle().fill(LinearGradient(colors: [color.opacity(0.78), color], startPoint: .top, endPoint: .bottom))
-            if group { Image(systemName: "person.2.fill").font(.system(size: size * 0.40, weight: .medium)).foregroundStyle(.white) }
+            if let photo {
+                Image(decorative: photo, scale: 1).resizable().scaledToFill()
+                    .frame(width: size, height: size).clipShape(Circle())
+            } else if group { Image(systemName: "person.2.fill").font(.system(size: size * 0.40, weight: .medium)).foregroundStyle(.white) }
             else if letters.isEmpty { Image(systemName: "person.fill").font(.system(size: size * 0.42)).foregroundStyle(.white) }
             else { Text(letters).font(.system(size: size * 0.36, weight: .semibold, design: .rounded)).foregroundStyle(.white) }
-        }.frame(width: size, height: size).accessibilityHidden(true)
+        }
+        .frame(width: size, height: size).accessibilityHidden(true)
+        .task(id: imageURL) {
+            guard let imageURL else { photo = nil; return }
+            let loaded = await ThumbnailStore.shared.image(at: imageURL)?.image
+            guard !Task.isCancelled else { return }
+            photo = loaded
+        }
     }
 }
 

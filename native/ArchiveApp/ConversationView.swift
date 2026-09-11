@@ -9,16 +9,21 @@ struct ConversationDetail: View {
         var parts: [String] = []
         if conversation.isGroup {
             parts.append(conversation.otherParticipants.map { $0.name.isEmpty ? $0.number : $0.name }.filter { !$0.isEmpty }.joined(separator: ", "))
-        } else if !conversation.numbers.isEmpty, conversation.numbers != conversation.title {
+        } else if !conversation.numbers.isEmpty, !Self.sameNumber(conversation.title, conversation.numbers) {
             parts.append(conversation.numbers)
         }
         if conversation.isArchived { parts.append("Archived") }
         return parts.joined(separator: " · ")
     }
+    /// "0497 573 812" and "+61497573812" are the same number written two ways.
+    private static func sameNumber(_ a: String, _ b: String) -> Bool {
+        let digitsA = a.filter(\.isNumber), digitsB = b.filter(\.isNumber)
+        guard digitsA.count >= 6, digitsB.count >= 6 else { return false }
+        return digitsA.hasSuffix(String(digitsB.suffix(8))) || digitsB.hasSuffix(String(digitsA.suffix(8)))
+    }
 
     var body: some View {
         VStack(spacing: 0) {
-            if model.showingThreadSearch { ThreadSearchView(); Divider() }
             if model.loadingMessages {
                 ProgressView().controlSize(.small).frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if model.messages.isEmpty && model.outbox.isEmpty {
@@ -28,16 +33,28 @@ struct ConversationDetail: View {
             Divider()
             MessageComposer()
         }
+        .overlay(alignment: .topTrailing) {
+            if model.showingThreadSearch && !model.threadQuery.trimmingCharacters(in: .whitespaces).isEmpty { ThreadResultsPanel() }
+        }
         .navigationTitle(conversation.title)
         .navigationSubtitle(subtitle)
         .toolbar {
-            ToolbarItemGroup(placement: .primaryAction) {
-                Button(action: model.toggleThreadSearch) { Label("Find in Conversation", systemImage: "magnifyingglass") }
-                    .help("Find in this conversation (⌘F)")
-                Toggle(isOn: $model.showingDetails) { Label("Conversation Info", systemImage: "info.circle") }
-                    .help("Contact details, photos, links and files (⌘I)")
+            ToolbarItem(placement: .navigation) {
+                Button(action: model.toggleDetails) {
+                    Avatar(name: conversation.title, size: 26, group: conversation.isGroup, imageURL: model.avatarURL(conversation))
+                }
+                .buttonStyle(.plain)
+                .help("Contact details, photos, links and files (⌘I)")
+                .accessibilityLabel("Conversation details")
+                .popover(isPresented: $model.showingDetails, arrowEdge: .bottom) {
+                    ConversationInfo(conversation: conversation).frame(width: 340, height: 540)
+                }
             }
         }
+        // The find field lives in the toolbar; on macOS 26 it collapses to its icon until used.
+        .searchable(text: $model.threadQuery, isPresented: $model.showingThreadSearch, placement: .toolbar, prompt: "Find in Conversation")
+        .onChange(of: model.threadQuery) { model.scheduleThreadSearch() }
+        .onChange(of: model.showingThreadSearch) { _, showing in if !showing { model.threadSearchDismissed() } }
     }
 }
 
@@ -415,57 +432,48 @@ struct OutboxBubble: View {
 
 // MARK: - Find in conversation
 
-private struct ThreadSearchView: View {
+// Results drop down beneath the toolbar find field without pushing the timeline.
+private struct ThreadResultsPanel: View {
     @EnvironmentObject private var model: ArchiveModel
-    @FocusState private var focused: Bool
     var body: some View {
-        VStack(spacing: 8) {
-            HStack(spacing: 8) {
-                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                TextField("Find in conversation", text: $model.threadQuery).textFieldStyle(.plain).focused($focused).accessibilityIdentifier("threadSearch")
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
                 if model.threadSearching { ProgressView().controlSize(.small) }
-                else if !model.threadQuery.isEmpty {
-                    Text(model.threadTotal == 1 ? "1 match" : "\(model.threadTotal.formatted()) matches").font(.caption).foregroundStyle(.secondary).monospacedDigit()
-                }
-                Button(action: model.toggleThreadSearch) { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
-                    .buttonStyle(.plain).accessibilityLabel("Close conversation search").help("Close (Esc)")
-            }
-            .padding(.horizontal, 10).padding(.vertical, 6)
-            .background(composerField, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Color.primary.opacity(0.12), lineWidth: 1))
-            if let error = model.threadError { Text(error).font(.caption).foregroundStyle(.secondary) }
+                Text(model.threadSearching ? "Searching…" : model.threadTotal == 1 ? "1 match" : "\(model.threadTotal.formatted()) matches")
+                    .font(.caption.weight(.medium)).foregroundStyle(.secondary).monospacedDigit()
+                Spacer()
+                Button { model.showingThreadSearch = false } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
+                    .buttonStyle(.plain).accessibilityLabel("Close find results").help("Close (Esc)")
+            }.padding(.horizontal, 4)
+            if let error = model.threadError { Text(error).font(.caption).foregroundStyle(.secondary).padding(.horizontal, 4) }
             if !model.threadResults.isEmpty {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 1) {
                         ForEach(model.threadResults) { message in
                             Button { model.select(message.conversationID, messageID: message.id) } label: {
-                                HStack(alignment: .firstTextBaseline, spacing: 10) {
-                                    Text(MessageText.highlighted(message.preview, query: model.threadQuery)).lineLimit(2).frame(maxWidth: .infinity, alignment: .leading)
-                                    Text(RelativeDate.list(message.date)).foregroundStyle(.secondary).font(.caption)
-                                }.font(.callout).padding(.horizontal, 8).padding(.vertical, 5)
-                                    .background(model.highlightedID == message.id ? archiveAccent.opacity(0.12) : .clear, in: RoundedRectangle(cornerRadius: 6))
-                                    .contentShape(Rectangle())
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(MessageText.highlighted(message.preview, query: model.threadQuery)).font(.callout).lineLimit(2)
+                                    Text((message.outgoing ? "You · " : "") + RelativeDate.list(message.date)).font(.caption2).foregroundStyle(.secondary)
+                                }
+                                .padding(.horizontal, 8).padding(.vertical, 5).frame(maxWidth: .infinity, alignment: .leading)
+                                .background(model.highlightedID == message.id ? archiveAccent.opacity(0.14) : .clear, in: RoundedRectangle(cornerRadius: 6))
+                                .contentShape(Rectangle())
                             }.buttonStyle(.plain)
                         }
                         if model.threadResults.count < model.threadTotal {
-                            Button("More Results") { model.scheduleThreadSearch(more: true) }.controlSize(.small).padding(.top, 4)
+                            Button("More Results") { model.scheduleThreadSearch(more: true) }.controlSize(.small).padding(6)
                         }
                     }
-                }.frame(maxHeight: 170)
-            } else if !model.threadQuery.isEmpty && !model.threadSearching {
-                Text("No matches in this conversation").font(.caption).foregroundStyle(.secondary)
+                }.frame(maxHeight: 280)
+            } else if !model.threadSearching {
+                Text("No matches in this conversation").font(.caption).foregroundStyle(.secondary).padding(.horizontal, 4).padding(.bottom, 2)
             }
         }
-        .padding(.horizontal, 16).padding(.vertical, 8).background(.bar)
-        .onAppear { if !model.threadQuery.isEmpty { model.scheduleThreadSearch() } }
-        .onChange(of: model.threadQuery) { model.scheduleThreadSearch() }
-        .onExitCommand { model.toggleThreadSearch() }
-        .task(id: model.focusThreadSearch) {
-            // Wait until the newly inserted field has joined the window's
-            // focus tree before taking focus from the composer.
-            await Task.yield()
-            guard !Task.isCancelled else { return }
-            focused = true
-        }
+        .padding(8).frame(width: 360)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(.quaternary, lineWidth: 1))
+        .shadow(color: .black.opacity(0.18), radius: 12, y: 4)
+        .padding(10)
+        .accessibilityIdentifier("threadSearchResults")
     }
 }

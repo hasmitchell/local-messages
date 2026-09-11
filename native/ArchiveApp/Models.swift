@@ -20,12 +20,23 @@ struct ConversationRecord: Identifiable, Sendable, Hashable {
     }
     var isGroup: Bool { otherParticipants.count > 1 }
     var isEmpty: Bool { messageCount == 0 }
+    /// Contact photo for one-to-one conversations; paths are data, so they are confined to media/avatars.
+    func avatarURL(in directory: URL) -> URL? {
+        guard !isGroup, let path = otherParticipants.first?.avatarPath, path.hasPrefix("media/avatars/"),
+              !path.split(separator: "/").contains("..") else { return nil }
+        let root = directory.standardizedFileURL.resolvingSymlinksInPath()
+        let url = root.appendingPathComponent(path).standardizedFileURL.resolvingSymlinksInPath()
+        guard url.path.hasPrefix(root.path + "/media/avatars/"), FileManager.default.fileExists(atPath: url.path) else { return nil }
+        return url
+    }
     var isArchived: Bool { folder == "ARCHIVE" }
 }
 
 struct ConversationParticipant: Codable, Sendable, Hashable, Identifiable {
     let id, name, number: String
     let isMe: Bool
+    /// Relative path of the phone's contact photo, filled from the archive's avatar table.
+    var avatarPath: String? = nil
     enum CodingKeys: String, CodingKey { case id, name, number; case isMe = "is_me" }
 }
 

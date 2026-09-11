@@ -32,7 +32,7 @@ struct ConversationInfo: View {
 
     private var header: some View {
         VStack(spacing: 6) {
-            Avatar(name: current.title, size: 68, group: current.isGroup).padding(.top, 6)
+            Avatar(name: current.title, size: 68, group: current.isGroup, imageURL: model.avatarURL(current)).padding(.top, 6)
             Text(current.title).font(.title3.weight(.semibold)).multilineTextAlignment(.center).textSelection(.enabled)
             VStack(spacing: 2) {
                 ForEach(current.otherParticipants) { person in

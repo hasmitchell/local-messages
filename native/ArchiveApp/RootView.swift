@@ -25,13 +25,6 @@ struct ArchiveRootView: View {
             .frame(minWidth: 520, maxWidth: .infinity, maxHeight: .infinity)
             .background(Color(nsColor: .textBackgroundColor))
         }
-        .inspector(isPresented: $model.showingDetails) {
-            if let conversation = model.selectedConversation {
-                ConversationInfo(conversation: conversation).inspectorColumnWidth(min: 280, ideal: 320, max: 460)
-            } else {
-                ContentUnavailableView("No Conversation", systemImage: "info.circle").inspectorColumnWidth(min: 280, ideal: 320, max: 460)
-            }
-        }
         .navigationSplitViewStyle(.balanced)
         .tint(archiveAccent)
         .frame(minWidth: 860, minHeight: 560)

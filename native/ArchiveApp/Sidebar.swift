@@ -20,7 +20,7 @@ struct ArchiveSidebar: View {
             List(selection: Binding(get: { model.selectedID }, set: { if let id = $0 { model.select(id) } })) {
                 Section {
                     ForEach(model.visibleConversations) { conversation in
-                        ConversationRow(conversation: conversation, unread: model.isUnread(conversation), draft: model.drafts[conversation.id])
+                        ConversationRow(conversation: conversation, unread: model.isUnread(conversation), draft: model.drafts[conversation.id], avatar: model.avatarURL(conversation))
                             .tag(conversation.id).id(conversation.id)
                             .listRowInsets(EdgeInsets(top: 4, leading: 8, bottom: 4, trailing: 10))
                     }
@@ -115,13 +115,14 @@ private struct ConversationRow: View {
     let conversation: ConversationRecord
     let unread: Bool
     let draft: DraftRecord?
+    let avatar: URL?
     private var hasDraft: Bool { draft.map { !$0.body.isEmpty || !$0.attachments.isEmpty } == true && draft?.submissionID == nil }
 
     var body: some View {
         HStack(alignment: .center, spacing: 8) {
             Circle().fill(archiveAccent).frame(width: 8, height: 8).opacity(unread ? 1 : 0)
                 .accessibilityLabel(unread ? "Unread" : "")
-            Avatar(name: conversation.title, size: 38, group: conversation.isGroup)
+            Avatar(name: conversation.title, size: 38, group: conversation.isGroup, imageURL: avatar)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text(conversation.title).font(.system(size: 13, weight: unread ? .bold : .semibold)).lineLimit(1)
@@ -158,7 +159,7 @@ private struct SearchResultsList: View {
                     ForEach(model.titleMatches.prefix(8)) { conversation in
                         Button { model.select(conversation.id) } label: {
                             HStack(spacing: 10) {
-                                Avatar(name: conversation.title, size: 28, group: conversation.isGroup)
+                                Avatar(name: conversation.title, size: 28, group: conversation.isGroup, imageURL: model.avatarURL(conversation))
                                 VStack(alignment: .leading, spacing: 1) {
                                     Text(conversation.title).font(.system(size: 13, weight: .medium)).lineLimit(1)
                                     if !conversation.numbers.isEmpty { Text(verbatim: conversation.numbers).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1) }

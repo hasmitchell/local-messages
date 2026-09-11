@@ -35,7 +35,6 @@ final class ArchiveModel: ObservableObject {
     @Published var threadTotal = 0
     @Published var threadSearching = false
     @Published var threadError: String?
-    @Published var focusThreadSearch = UUID()
     @Published var showingDetails = false
     @Published var windowIsKey = true
     @Published private(set) var seenRevision = 0
@@ -566,11 +565,6 @@ final class ArchiveModel: ObservableObject {
             composerError = nil
         } catch { composerError = "Reaction status is unconfirmed. Check the phone before trying again." }
     }
-    func toggleThreadSearch() {
-        showingThreadSearch.toggle()
-        if showingThreadSearch { focusThreadSearch = UUID() }
-        else { threadSearchTask?.cancel(); threadQuery = ""; threadResults = []; threadTotal = 0; highlightedID = nil }
-    }
     func scheduleThreadSearch(more: Bool = false) {
         threadSearchTask?.cancel()
         let token = UUID(); threadSearchGeneration = token
@@ -685,6 +679,11 @@ final class ArchiveModel: ObservableObject {
         })
     }
     func isUnread(_ conversation: ConversationRecord) -> Bool { seenStore?.isUnread(conversation) ?? false }
+    func avatarURL(_ conversation: ConversationRecord) -> URL? { directory.flatMap { conversation.avatarURL(in: $0) } }
+    /// The toolbar find field was closed (Esc or its cancel button): clear its results.
+    func threadSearchDismissed() {
+        threadSearchTask?.cancel(); threadQuery = ""; threadResults = []; threadTotal = 0; threadSearching = false; highlightedID = nil
+    }
     var unreadCount: Int { conversations.filter { isUnread($0) }.count }
     func toggleDetails() { showingDetails.toggle() }
     func windowBecameKey() {

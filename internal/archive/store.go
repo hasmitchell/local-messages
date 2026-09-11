@@ -56,10 +56,11 @@ type Conversation struct {
 }
 
 type Participant struct {
-	ID     string `json:"id"`
-	Name   string `json:"name"`
-	Number string `json:"number"`
-	IsMe   bool   `json:"is_me"`
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Number    string `json:"number"`
+	IsMe      bool   `json:"is_me"`
+	ContactID string `json:"contact_id,omitempty"`
 }
 
 type Progress struct {
@@ -139,6 +140,7 @@ func Open(dir string) (*Store, error) {
       CREATE TABLE IF NOT EXISTS conversation_details(id TEXT PRIMARY KEY,payload BLOB NOT NULL);
       CREATE TABLE IF NOT EXISTS outbox_commands(id TEXT PRIMARY KEY,payload BLOB NOT NULL);
       CREATE TABLE IF NOT EXISTS media_gc(path TEXT PRIMARY KEY);
+      CREATE TABLE IF NOT EXISTS participant_avatars(participant_id TEXT PRIMARY KEY,path TEXT NOT NULL,hash TEXT NOT NULL,updated INTEGER NOT NULL);
     `)
 	if err != nil {
 		db.Close()
