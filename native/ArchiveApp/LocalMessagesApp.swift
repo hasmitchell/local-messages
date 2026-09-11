@@ -22,6 +22,8 @@ struct LocalMessagesApp: App {
         .defaultSize(width: 1180, height: 780)
         .commands {
             CommandGroup(replacing: .newItem) {
+                Button("New Message…") { model.startError = nil; model.showingNewMessage = true }
+                    .keyboardShortcut("n").disabled(!model.canSync || model.loading)
                 Button("Open Archive…", action: model.chooseArchive).keyboardShortcut("o")
             }
             CommandGroup(after: .textEditing) {

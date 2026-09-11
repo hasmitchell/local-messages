@@ -232,6 +232,30 @@ func (c *Client) ParticipantThumbnails(ctx context.Context, ids []string) (map[s
 	return photos, nil
 }
 
+// StartConversation resolves a phone number to its conversation, creating one
+// on the phone when none exists. Group creation is deliberately not offered.
+func (c *Client) StartConversation(ctx context.Context, number string) (archive.Conversation, error) {
+	requestCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	defer cancel()
+	resp, err := c.GM.GetOrCreateConversation(requestCtx, &gmproto.GetOrCreateConversationRequest{
+		Numbers: []*gmproto.ContactNumber{{MysteriousInt: 2, Number: number, Number2: number}},
+	})
+	if err != nil {
+		return archive.Conversation{}, &safeRequestError{label: "Google conversation creation failed", cause: err}
+	}
+	raw := resp.GetConversation()
+	if raw.GetConversationID() == "" {
+		return archive.Conversation{}, fmt.Errorf("the phone returned no conversation for that number")
+	}
+	folder := "INBOX"
+	switch raw.GetStatus() {
+	case gmproto.ConversationStatus_ARCHIVED, gmproto.ConversationStatus_KEEP_ARCHIVED:
+		folder = "ARCHIVE"
+	default:
+	}
+	return ConvertConversation(raw, folder), nil
+}
+
 func (c *Client) Lookup(ctx context.Context, id string) (archive.Conversation, bool, error) {
 	requestCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()

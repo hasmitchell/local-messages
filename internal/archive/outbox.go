@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -20,7 +21,14 @@ type SendCommand struct {
 	Files          []OutgoingFile `json:"files,omitempty"`
 	MessageID      string         `json:"message_id,omitempty"`
 	Emoji          string         `json:"emoji,omitempty"`
+	// Number starts a conversation with a phone number; the phone resolves it
+	// to an existing or new conversation ID.
+	Number string `json:"number,omitempty"`
 }
+
+var phoneNumberPattern = regexp.MustCompile(`^\+?[0-9]{6,15}$`)
+
+func (c SendCommand) IsStart() bool { return c.Kind == "start" }
 
 type OutgoingFile struct {
 	ID     string `json:"id"`
@@ -34,7 +42,13 @@ const MaxUploadBytes = 25 << 20
 
 func (c SendCommand) Valid() bool {
 	_, err := uuid.Parse(c.ID)
-	if err != nil || len(c.ID) != 36 || c.ConversationID == "" || len(c.ConversationID) > 512 {
+	if err != nil || len(c.ID) != 36 {
+		return false
+	}
+	if c.Kind == "start" {
+		return c.ConversationID == "" && c.Body == "" && len(c.Files) == 0 && c.MessageID == "" && c.Emoji == "" && phoneNumberPattern.MatchString(c.Number)
+	}
+	if c.ConversationID == "" || len(c.ConversationID) > 512 || c.Number != "" {
 		return false
 	}
 	if c.Kind == "react" {
@@ -86,13 +100,50 @@ func (s *Store) ReserveSend(c SendCommand) (bool, error) {
 	}
 	return true, tx.Commit()
 }
+// ReserveStart records the intent to open a conversation with a number. The
+// row has no conversation until the phone answers; the result lands in remote_id.
+func (s *Store) ReserveStart(c SendCommand) (bool, error) {
+	if !c.Valid() || !c.IsStart() {
+		return false, fmt.Errorf("invalid start command")
+	}
+	now := time.Now().UnixMicro()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	result, err := tx.Exec(`INSERT INTO outbox(id,conversation_id,body,state,reason,created,updated,remote_id) VALUES(?,'','','preparing','',?,?,'') ON CONFLICT(id) DO NOTHING`, c.ID, now, now)
+	if err != nil {
+		return false, err
+	}
+	n, err := result.RowsAffected()
+	if err != nil || n == 0 {
+		return false, err
+	}
+	data, err := json.Marshal(c)
+	if err != nil {
+		return false, err
+	}
+	if _, err = tx.Exec(`INSERT INTO outbox_commands VALUES(?,?)`, c.ID, data); err != nil {
+		return false, err
+	}
+	return true, tx.Commit()
+}
+
+func (s *Store) SetStartResult(id, conversationID string) error {
+	_, err := s.db.Exec(`UPDATE outbox SET state='resolved',reason='',remote_id=?,updated=? WHERE id=? AND conversation_id=''`, conversationID, time.Now().UnixMicro(), id)
+	return err
+}
+
 func (s *Store) SetSendState(id, state, reason string) error {
 	_, err := s.db.Exec(`UPDATE outbox SET state=?,reason=?,updated=? WHERE id=? AND state!='confirmed'`, state, reason, time.Now().UnixMicro(), id)
 	return err
 }
 func (s *Store) RecoverInterruptedSends() error {
-	_, err := s.db.Exec(`UPDATE outbox SET state=CASE state WHEN 'preparing' THEN 'failed' ELSE 'unknown' END,
-        reason=CASE state WHEN 'preparing' THEN 'interrupted_before_send' ELSE 'interrupted' END,updated=? WHERE state IN ('preparing','sending')`, time.Now().UnixMicro())
+	// Opening a conversation is idempotent on the phone, so an interrupted
+	// start simply fails and can be retried.
+	_, err := s.db.Exec(`UPDATE outbox SET state=CASE state WHEN 'sending' THEN 'unknown' ELSE 'failed' END,
+        reason=CASE state WHEN 'sending' THEN 'interrupted' ELSE 'interrupted_before_send' END,updated=? WHERE state IN ('preparing','sending','resolving')`, time.Now().UnixMicro())
 	return err
 }
 func (s *Store) SendState(id string) (string, error) {

@@ -11,7 +11,14 @@ struct ArchiveSidebar: View {
         }
         .safeAreaInset(edge: .bottom, spacing: 0) { SidebarStatusBar() }
         .modifier(SidebarSearch(query: $model.query, focusToken: model.focusSearch))
-        .toolbar { ToolbarItem { AccountMenu() } }
+        .toolbar {
+            ToolbarItem {
+                Button { model.startError = nil; model.showingNewMessage = true } label: { Label("New Message", systemImage: "square.and.pencil") }
+                    .help(model.canSync ? "Start a conversation with a phone number (⌘N)" : "Sending needs a paired account")
+                    .disabled(!model.canSync || model.loading)
+            }
+            ToolbarItem { AccountMenu() }
+        }
         .onChange(of: model.query) { model.scheduleSearch() }
     }
 

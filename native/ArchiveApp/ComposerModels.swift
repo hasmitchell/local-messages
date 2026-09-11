@@ -41,7 +41,16 @@ struct SendCommand: Codable, Sendable, Hashable {
     var files: [DraftAttachment]? = nil
     var messageID: String? = nil
     var emoji: String? = nil
-    enum CodingKeys: String, CodingKey { case kind, id, body, connection, files, emoji; case conversationID = "conversation_id", messageID = "message_id" }
+    var number: String? = nil
+    enum CodingKeys: String, CodingKey { case kind, id, body, connection, files, emoji, number; case conversationID = "conversation_id", messageID = "message_id" }
+    /// Digits with an optional leading +, as the worker requires; nil when the text is not a phone number.
+    static func normalizedNumber(_ text: String) -> String? {
+        var cleaned = text.filter { !" -().\u{00A0}".contains($0) }
+        let plus = cleaned.hasPrefix("+")
+        if plus { cleaned.removeFirst() }
+        guard !cleaned.isEmpty, cleaned.allSatisfy(\.isNumber), (6...15).contains(cleaned.count) else { return nil }
+        return (plus ? "+" : "") + cleaned
+    }
     static func validBody(_ body: String) -> Bool {
         !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && body.unicodeScalars.count <= 4000 && body.utf8.count <= 16000
     }

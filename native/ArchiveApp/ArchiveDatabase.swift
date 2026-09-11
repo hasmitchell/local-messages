@@ -104,6 +104,13 @@ actor ArchiveDatabase {
         while try rows.next() { result.append(OutboxRecord(id: rows.text(0), conversationID: rows.text(1), body: rows.text(2), state: rows.text(3), reason: rows.text(4), remoteID: rows.text(5), created: rows.integer(6), command: try? JSONDecoder().decode(SendCommand.self, from: rows.data(7)))) }
         return result
     }
+    struct SubmissionStatus: Sendable { let state, reason, remoteID: String }
+    func submission(_ id: String) throws -> SubmissionStatus? {
+        guard try hasTable("outbox") else { return nil }
+        let row = try ReadStatement(connection, "SELECT state,reason,remote_id FROM outbox WHERE id=?", [.text(id)])
+        guard try row.next() else { return nil }
+        return SubmissionStatus(state: row.text(0), reason: row.text(1), remoteID: row.text(2))
+    }
     func submissionExists(_ id: String) throws -> Bool {
         guard try hasTable("outbox") else { return false }
         return try scalar("SELECT EXISTS(SELECT 1 FROM outbox WHERE id=?)", [.text(id)]) == 1

@@ -35,6 +35,7 @@ struct ArchiveRootView: View {
         .quickLookPreview($model.previewURL)
         .preferredColorScheme(appearance == "dark" ? .dark : appearance == "light" ? .light : nil)
         .sheet(isPresented: $model.showingAccounts) { AccountsView(pairing: model.addingAccount).environmentObject(model) }
+        .sheet(isPresented: $model.showingNewMessage) { NewMessageView().environmentObject(model) }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             Task { await model.notifications.refreshSettings() }
         }

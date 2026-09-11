@@ -37,6 +37,11 @@ final class ArchiveModel: ObservableObject {
     @Published var threadError: String?
     @Published var showingDetails = false
     @Published var windowIsKey = true
+    @Published var showingNewMessage = false
+    @Published var pendingStart: PendingStart?
+    @Published var startError: String?
+    struct PendingStart: Equatable { let id, number: String; let started: Date }
+    var canStartConversation: Bool { canSync && syncEnabled && syncState.canSend && !pairingBusy && pendingStart == nil }
     @Published private(set) var seenRevision = 0
     private var seenStore: SeenStore?
     @Published var library = ConversationLibrary()
@@ -263,6 +268,7 @@ final class ArchiveModel: ObservableObject {
         directory = url.standardizedFileURL
         seenStore = SeenStore(directory: url)
         seenRevision += 1
+        pendingStart = nil; startError = nil; showingNewMessage = false
         NSApp.dockTile.badgeLabel = nil
         Task {
             do {
@@ -321,6 +327,7 @@ final class ArchiveModel: ObservableObject {
                         try await self.refreshVisible(reader, generation: generation)
                     }
                     if self.canSync { try await self.checkArrivals(reader, generation: generation) }
+                    self.checkStartTimeout()
                     version = current
                     try await Task.sleep(for: .seconds(1))
                 } catch is CancellationError { return }
@@ -338,6 +345,7 @@ final class ArchiveModel: ObservableObject {
         guard archiveGeneration == generation else { return }
         overview = snapshot
         updateBadge()
+        try await checkPendingStart(reader, generation: generation)
         if let directory { try await acknowledgeDrafts(reader, directory: directory, generation: generation) }
         for (message, submission) in pendingReactions {
             if try await reader.submissionExists(submission) { pendingReactions.removeValue(forKey: message) }
@@ -677,6 +685,41 @@ final class ArchiveModel: ObservableObject {
             guard let self, self.archiveGeneration == generation else { return }
             self.syncController.configure(directory: directory, enabled: self.syncEnabled)
         })
+    }
+    /// Asks the phone for the conversation belonging to a number; the result arrives through the outbox.
+    func startConversation(with text: String) {
+        guard canStartConversation else { return }
+        guard let number = SendCommand.normalizedNumber(text) else {
+            startError = "Enter a phone number, for example +61 400 000 000 or 0400 000 000."
+            return
+        }
+        let id = UUID().uuidString.lowercased()
+        startError = nil
+        do {
+            try syncController.send(SendCommand(kind: "start", id: id, conversationID: "", body: "", number: number))
+            pendingStart = PendingStart(id: id, number: number, started: Date())
+        } catch { startError = "The phone connection is not ready. Try again once sync shows Connected." }
+    }
+    private func checkPendingStart(_ reader: ArchiveDatabase, generation: UUID) async throws {
+        guard let pending = pendingStart else { return }
+        guard let status = try await reader.submission(pending.id), archiveGeneration == generation, pendingStart == pending else { return }
+        switch status.state {
+        case "resolved" where !status.remoteID.isEmpty:
+            pendingStart = nil
+            showingNewMessage = false
+            if let conversation = conversations.first(where: { $0.id == status.remoteID }) { filter = conversation.isArchived ? .archived : .inbox }
+            select(status.remoteID, force: true)
+        case "failed":
+            pendingStart = nil
+            startError = status.reason == "offline" ? "The phone connection dropped before it answered. Try again once sync shows Connected."
+                : "Your phone could not open a conversation with \(pending.number). Check the number and try again."
+        default: break
+        }
+    }
+    private func checkStartTimeout() {
+        guard let pending = pendingStart, Date().timeIntervalSince(pending.started) > 60 else { return }
+        pendingStart = nil
+        startError = "No answer from the phone. Check that Google Messages is open on it, then try again."
     }
     func isUnread(_ conversation: ConversationRecord) -> Bool { seenStore?.isUnread(conversation) ?? false }
     func avatarURL(_ conversation: ConversationRecord) -> URL? { directory.flatMap { conversation.avatarURL(in: $0) } }

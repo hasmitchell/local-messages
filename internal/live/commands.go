@@ -45,6 +45,9 @@ type sender interface {
 type reacter interface {
 	PrepareReaction(context.Context, archive.SendCommand, archive.Message) (func(context.Context) (bool, error), error)
 }
+type starter interface {
+	StartConversation(context.Context, string) (archive.Conversation, error)
+}
 type sendSession struct {
 	token   string
 	ctx     context.Context
@@ -75,6 +78,9 @@ func (r *commandRouter) run(ctx context.Context, commands <-chan archive.SendCom
 	}
 }
 func (r *commandRouter) execute(command archive.SendCommand, session *sendSession) error {
+	if command.IsStart() {
+		return r.start(command, session)
+	}
 	created, err := r.store.ReserveSend(command)
 	if err != nil || !created {
 		return err
@@ -122,6 +128,42 @@ func (r *commandRouter) execute(command archive.SendCommand, session *sendSessio
 		return state("applied", "")
 	}
 	return state("accepted", "")
+}
+
+// start asks the phone for the conversation belonging to a number. The phone
+// returns an existing thread when there is one, so repeating a start is safe.
+func (r *commandRouter) start(command archive.SendCommand, session *sendSession) error {
+	created, err := r.store.ReserveStart(command)
+	if err != nil || !created {
+		return err
+	}
+	state := func(value, reason string) error { return r.store.SetSendState(command.ID, value, reason) }
+	if session == nil || session.ctx.Err() != nil || command.Connection != session.token {
+		return state("failed", "offline")
+	}
+	client, ok := session.client.(starter)
+	if !ok {
+		return state("failed", "preflight")
+	}
+	if err = state("resolving", ""); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(session.ctx, 45*time.Second)
+	defer cancel()
+	conversation, err := client.StartConversation(ctx, command.Number)
+	if err != nil || conversation.ID == "" {
+		if ctx.Err() != nil {
+			return state("failed", "offline")
+		}
+		return state("failed", "phone_rejected")
+	}
+	if err = r.store.PutConversation(conversation); err != nil {
+		return err
+	}
+	if session.refresh != nil {
+		session.refresh(conversation.ID)
+	}
+	return r.store.SetStartResult(command.ID, conversation.ID)
 }
 
 func (r *commandRouter) token() string {

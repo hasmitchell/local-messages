@@ -69,6 +69,7 @@ enum SnapshotRunner {
         case "contact": if let dad = model.conversations.first(where: { $0.id == "dad" }) { model.select(dad.id) }
         case "draft": model.editDraft("A draft that has not been sent yet.\nSecond line of the draft.")
         case "old": model.select("alex", messageID: "alex-0000")
+        case "newmessage": model.showingNewMessage = true
         case "inspector":
             // The inspector column renders off-process in glass mode, so host the
             // same view in a plain window to check its layout.

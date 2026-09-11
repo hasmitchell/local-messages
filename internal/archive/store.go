@@ -501,3 +501,6 @@ func (s *Store) Stats() (Stats, error) {
 	}
 	return out, nil
 }
+
+// DB exposes the connection for tests and diagnostics.
+func (s *Store) DB() *sql.DB { return s.db }
