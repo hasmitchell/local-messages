@@ -37,6 +37,7 @@ struct ArchiveSidebar: View {
                             ForEach(ConversationFilter.allCases) { Text($0.rawValue).tag($0) }
                         }
                         .pickerStyle(.segmented).labelsHidden().controlSize(.small)
+                        .tint(.accentColor)
                         .frame(maxWidth: .infinity).padding(.bottom, 4)
                     }
                 }

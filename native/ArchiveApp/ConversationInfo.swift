@@ -15,7 +15,7 @@ struct ConversationInfo: View {
             VStack(spacing: 14) {
                 header
                 Picker("Shared items", selection: $tab) { Text("Photos").tag("Photos"); Text("Links").tag("Links"); Text("Files").tag("Files") }
-                    .pickerStyle(.segmented).labelsHidden().controlSize(.small)
+                    .pickerStyle(.segmented).labelsHidden().tint(.accentColor)
                 if let error = model.libraryError { Text(error).font(.caption).foregroundStyle(.secondary) }
                 if tab == "Photos" { photoGrid } else if tab == "Links" { links } else { files }
                 if model.libraryLoading { ProgressView().controlSize(.small).padding(.top, 6) }
@@ -50,7 +50,7 @@ struct ConversationInfo: View {
         let photos = model.library.files.filter { $0.attachment.isImage }
         return VStack {
             if photos.isEmpty && !model.libraryLoading { empty("No Photos", icon: "photo") }
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 84), spacing: 4)], spacing: 4) {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 104), spacing: 4)], spacing: 4) {
                 ForEach(photos) { item in
                     Button { preview(item) } label: {
                         // A square cell sized from the column width; the thumbnail fills and is clipped.

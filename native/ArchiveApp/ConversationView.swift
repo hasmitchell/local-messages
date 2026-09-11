@@ -40,21 +40,36 @@ struct ConversationDetail: View {
         .navigationSubtitle(subtitle)
         .toolbar {
             ToolbarItem(placement: .navigation) {
-                Button(action: model.toggleDetails) {
-                    Avatar(name: conversation.title, size: 26, group: conversation.isGroup, imageURL: model.avatarURL(conversation))
-                }
-                .buttonStyle(.plain)
-                .help("Contact details, photos, links and files (⌘I)")
-                .accessibilityLabel("Conversation details")
-                .popover(isPresented: $model.showingDetails, arrowEdge: .bottom) {
-                    ConversationInfo(conversation: conversation).frame(width: 340, height: 540)
-                }
+                AvatarButton(conversation: conversation)
+                    .popover(isPresented: $model.showingDetails, arrowEdge: .bottom) {
+                        ConversationInfo(conversation: conversation).frame(width: 500, height: 660)
+                    }
             }
         }
         // The find field lives in the toolbar; on macOS 26 it collapses to its icon until used.
         .searchable(text: $model.threadQuery, isPresented: $model.showingThreadSearch, placement: .toolbar, prompt: "Find in Conversation")
         .onChange(of: model.threadQuery) { model.scheduleThreadSearch() }
         .onChange(of: model.showingThreadSearch) { _, showing in if !showing { model.threadSearchDismissed() } }
+    }
+}
+
+// The avatar keeps the toolbar's own button chrome and adds hover feedback,
+// so it reads as clickable like its neighbours.
+private struct AvatarButton: View {
+    @EnvironmentObject private var model: ArchiveModel
+    let conversation: ConversationRecord
+    @State private var hovering = false
+    var body: some View {
+        Button(action: model.toggleDetails) {
+            Avatar(name: conversation.title, size: 24, group: conversation.isGroup, imageURL: model.avatarURL(conversation))
+                .overlay(Circle().strokeBorder(Color.primary.opacity(hovering ? 0.35 : 0.12), lineWidth: 1))
+                .scaleEffect(hovering ? 1.08 : 1)
+                .animation(.easeOut(duration: 0.12), value: hovering)
+                .padding(2)
+        }
+        .onHover { hovering = $0 }
+        .help("Contact details, photos, links and files (⌘I)")
+        .accessibilityLabel("Conversation details")
     }
 }
 
