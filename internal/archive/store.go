@@ -151,6 +151,13 @@ func Open(dir string) (*Store, error) {
 
 func (s *Store) Close() error { return s.db.Close() }
 
+// SetUnread mirrors a read state the phone has just accepted, so the sidebar
+// does not wait for the next inventory pass.
+func (s *Store) SetUnread(id string, unread bool) error {
+	_, err := s.db.Exec(`UPDATE conversations SET unread=? WHERE id=?`, unread, id)
+	return err
+}
+
 func (s *Store) SetMeta(key, value string) error {
 	_, err := s.db.Exec(`INSERT INTO metadata(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, key, value)
 	return err

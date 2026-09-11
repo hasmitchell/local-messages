@@ -21,6 +21,9 @@ struct AppSettingsView: View {
 private struct GeneralSettings: View {
     @AppStorage("appearance") private var appearance = "system"
     @AppStorage("dockBadge") private var dockBadge = true
+    @AppStorage("markReadOnPhone") private var markReadOnPhone = true
+    @AppStorage("spellCheck") private var spellCheck = true
+    @AppStorage("autocorrect") private var autocorrect = false
     var body: some View {
         Form {
             Section("Appearance") {
@@ -28,12 +31,17 @@ private struct GeneralSettings: View {
                     Text("Follow macOS").tag("system"); Text("Light").tag("light"); Text("Dark").tag("dark")
                 }
             }
-            Section("Unread messages") {
+            Section("Reading") {
+                Toggle("Mark conversations as read on your phone when you view them here", isOn: $markReadOnPhone)
                 Toggle("Show unread count on the app icon", isOn: $dockBadge)
-                Text("A conversation counts as unread until you open it here or read it on your phone. Reading on this Mac never changes the phone's read status.")
+                Text("With phone read status on, opening a conversation's newest messages here clears it on the phone too. Otherwise a conversation only counts as read here until your phone reports it read.")
                     .font(.caption).foregroundStyle(.secondary)
             }
-        }.formStyle(.grouped).frame(height: 270)
+            Section("Writing") {
+                Toggle("Check spelling while typing", isOn: $spellCheck)
+                Toggle("Correct spelling automatically", isOn: $autocorrect)
+            }
+        }.formStyle(.grouped).frame(height: 400)
     }
 }
 

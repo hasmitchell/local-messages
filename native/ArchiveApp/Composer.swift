@@ -7,6 +7,8 @@ struct MessageComposer: View {
     @FocusState private var focused: Bool
     @State private var choosingFiles = false
     @State private var editorWidth: CGFloat = 400
+    @AppStorage("spellCheck") private var spellCheck = true
+    @AppStorage("autocorrect") private var autocorrect = false
 
     private struct Note { let text: String; let symbol: String; let warning: Bool }
     private var note: Note? {
@@ -76,6 +78,7 @@ struct MessageComposer: View {
                 .font(.system(size: 14)).lineSpacing(1).focused($focused).scrollContentBackground(.hidden)
                 .frame(height: editorHeight)
                 .background(GeometryReader { proxy in Color.clear.preference(key: ComposerWidthPreference.self, value: proxy.size.width) })
+                .background(TextViewOptions(spellCheck: spellCheck, autocorrect: autocorrect))
                 .disabled(model.draft.submissionID != nil)
                 .accessibilityIdentifier("messageComposer").accessibilityLabel("Message composer")
             if model.draft.body.isEmpty {
@@ -126,5 +129,48 @@ private struct AttachmentStrip: View {
                 }
             }.padding(.horizontal, 4)
         }.scrollIndicators(.hidden)
+    }
+}
+
+// SwiftUI's TextEditor has no spell-checking controls on macOS, so this
+// locates the underlying text view beside it and applies the preferences.
+private struct TextViewOptions: NSViewRepresentable {
+    let spellCheck: Bool
+    let autocorrect: Bool
+    func makeNSView(context: Context) -> Probe { let probe = Probe(); apply(probe); return probe }
+    func updateNSView(_ nsView: Probe, context: Context) { apply(nsView) }
+    private func apply(_ probe: Probe) {
+        probe.spellCheck = spellCheck
+        probe.autocorrect = autocorrect
+        probe.applyWhenReady()
+    }
+    final class Probe: NSView {
+        var spellCheck = true
+        var autocorrect = false
+        override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); applyWhenReady() }
+        func applyWhenReady() {
+            DispatchQueue.main.async { [weak self] in self?.applyNow() }
+        }
+        private func applyNow() {
+            var ancestor: NSView? = superview
+            for _ in 0..<4 {
+                guard let candidate = ancestor else { return }
+                if let textView = Self.textView(in: candidate) {
+                    textView.isContinuousSpellCheckingEnabled = spellCheck
+                    textView.isGrammarCheckingEnabled = false
+                    textView.isAutomaticSpellingCorrectionEnabled = autocorrect
+                    #if UI_SNAPSHOTS
+                    FileHandle.standardError.write(Data("spellcheck applied: \(textView.isContinuousSpellCheckingEnabled)\n".utf8))
+                    #endif
+                    return
+                }
+                ancestor = candidate.superview
+            }
+        }
+        private static func textView(in view: NSView) -> NSTextView? {
+            if let textView = view as? NSTextView { return textView }
+            for child in view.subviews { if let found = textView(in: child) { return found } }
+            return nil
+        }
     }
 }

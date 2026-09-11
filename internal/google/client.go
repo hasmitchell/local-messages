@@ -256,6 +256,16 @@ func (c *Client) StartConversation(ctx context.Context, number string) (archive.
 	return ConvertConversation(raw, folder), nil
 }
 
+// MarkRead tells the phone the conversation has been read up to a message.
+func (c *Client) MarkRead(ctx context.Context, conversationID, messageID string) error {
+	requestCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if err := c.GM.MarkRead(requestCtx, conversationID, messageID); err != nil {
+		return &safeRequestError{label: "read status update failed", cause: err}
+	}
+	return nil
+}
+
 func (c *Client) Lookup(ctx context.Context, id string) (archive.Conversation, bool, error) {
 	requestCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()

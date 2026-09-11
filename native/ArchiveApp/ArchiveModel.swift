@@ -41,6 +41,7 @@ final class ArchiveModel: ObservableObject {
     @Published var pendingStart: PendingStart?
     @Published var startError: String?
     struct PendingStart: Equatable { let id, number: String; let started: Date }
+    private var markedRead: [String: String] = [:]
     var canStartConversation: Bool { canSync && syncEnabled && syncState.canSend && !pairingBusy && pendingStart == nil }
     @Published private(set) var seenRevision = 0
     private var seenStore: SeenStore?
@@ -269,6 +270,7 @@ final class ArchiveModel: ObservableObject {
         seenStore = SeenStore(directory: url)
         seenRevision += 1
         pendingStart = nil; startError = nil; showingNewMessage = false
+        markedRead = [:]
         NSApp.dockTile.badgeLabel = nil
         Task {
             do {
@@ -737,9 +739,22 @@ final class ArchiveModel: ObservableObject {
     private func markVisibleAsSeen() {
         guard let id = selectedID, let seenStore else { return }
         let timestamp = max(selectedConversation?.timestamp ?? 0, messages.last?.timestamp ?? 0)
+        markReadOnPhoneIfNeeded()
         guard timestamp > 0, seenStore.markSeen(id, timestamp: timestamp) else { return }
         seenRevision += 1
         updateBadge()
+    }
+    /// Tells the phone the open conversation is read up to its newest message, once per message.
+    private func markReadOnPhoneIfNeeded() {
+        guard UserDefaults.standard.object(forKey: "markReadOnPhone") as? Bool ?? true,
+              canSync, syncEnabled, syncState.canSend, !pairingBusy,
+              let conversation = selectedConversation, conversation.unread,
+              let latest = messages.last(where: { !$0.outgoing }) ?? messages.last,
+              markedRead[conversation.id] != latest.id else { return }
+        do {
+            try syncController.send(SendCommand(kind: "mark_read", id: UUID().uuidString.lowercased(), conversationID: conversation.id, body: "", messageID: latest.id))
+            markedRead[conversation.id] = latest.id
+        } catch { /* Best effort: the phone keeps showing it unread until the next visit. */ }
     }
     private func updateBadge() {
         let count = canSync ? unreadCount : 0

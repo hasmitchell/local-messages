@@ -48,6 +48,9 @@ type reacter interface {
 type starter interface {
 	StartConversation(context.Context, string) (archive.Conversation, error)
 }
+type readMarker interface {
+	MarkRead(context.Context, string, string) error
+}
 type sendSession struct {
 	token   string
 	ctx     context.Context
@@ -80,6 +83,9 @@ func (r *commandRouter) run(ctx context.Context, commands <-chan archive.SendCom
 func (r *commandRouter) execute(command archive.SendCommand, session *sendSession) error {
 	if command.IsStart() {
 		return r.start(command, session)
+	}
+	if command.Kind == "mark_read" {
+		return r.markRead(command, session)
 	}
 	created, err := r.store.ReserveSend(command)
 	if err != nil || !created {
@@ -164,6 +170,22 @@ func (r *commandRouter) start(command archive.SendCommand, session *sendSession)
 		session.refresh(conversation.ID)
 	}
 	return r.store.SetStartResult(command.ID, conversation.ID)
+}
+
+// markRead is best effort and idempotent: it needs no outbox row, and a
+// failure only means the phone keeps showing the thread as unread.
+func (r *commandRouter) markRead(command archive.SendCommand, session *sendSession) error {
+	if !command.Valid() || session == nil || session.ctx.Err() != nil || command.Connection != session.token {
+		return nil
+	}
+	client, ok := session.client.(readMarker)
+	if !ok {
+		return nil
+	}
+	if err := client.MarkRead(session.ctx, command.ConversationID, command.MessageID); err != nil {
+		return nil
+	}
+	return r.store.SetUnread(command.ConversationID, false)
 }
 
 func (r *commandRouter) token() string {

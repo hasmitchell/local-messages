@@ -84,3 +84,7 @@ On a 14-inch screen the details inspector did not fit beside the sidebar and tim
 ### New conversations — version 0.7.2 (11 September 2026)
 
 The user asked to text a number that has no conversation yet. New Message (⌘N or the sidebar pencil button) takes a phone number; the worker sends a durable `start` command through the existing outbox path, asks the phone for the conversation belonging to that number (the phone returns an existing thread when there is one), stores it and reports the result, and the app opens the thread for composing. Failures distinguish a lost connection from a number the phone rejected, and an unanswered request times out after a minute. Group creation remains out of scope. The synthetic tests cover the resolved, rejected, offline and unsupported paths and duplicate suppression; sending to a genuinely new number is a live acceptance check.
+
+### Read status and spelling — version 0.7.3 (11 September 2026)
+
+Viewing a conversation's newest messages on the Mac now sends the phone a read marker for the latest message, so the phone stops showing it unread; the request is best effort, needs no outbox row, and updates the local unread flag immediately when the phone accepts it. General settings can turn it off, restoring the earlier behaviour where reading here was invisible to the phone. The composer's text view now checks spelling continuously, with automatic correction as an opt-in. Synthetic tests cover the read marker's success, failure, stale-connection and unsupported paths; the phone-side effect is a live check.
