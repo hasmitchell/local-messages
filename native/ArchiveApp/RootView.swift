@@ -38,6 +38,10 @@ struct ArchiveRootView: View {
         .sheet(isPresented: $model.showingNewMessage) { NewMessageView().environmentObject(model) }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             Task { await model.notifications.refreshSettings() }
+            model.sendPresence()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
+            model.sendPresence()
         }
     }
 }

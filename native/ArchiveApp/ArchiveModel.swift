@@ -64,7 +64,18 @@ final class ArchiveModel: ObservableObject {
     @Published var syncState: SyncState = .local
     @Published var canSync = false
     @Published var syncEnabled = !UserDefaults.standard.bool(forKey: "syncPaused")
-    private lazy var syncController = SyncController { [weak self] state in self?.syncState = state }
+    private lazy var syncController = SyncController { [weak self] state in
+        guard let self else { return }
+        let wasReady = self.syncState.canSend
+        self.syncState = state
+        if state.canSend && !wasReady { self.sendPresence() }
+    }
+    /// The worker polls the phone less while the app is not in front; fresh messages still arrive through events.
+    func sendPresence() {
+        guard canSync, syncEnabled, syncState.canSend else { return }
+        let state = NSApp.isActive ? "active" : "idle"
+        try? syncController.send(SendCommand(kind: "presence", id: UUID().uuidString.lowercased(), conversationID: "", body: state))
+    }
     let relinking = RelinkController()
     let addingAccount = RelinkController()
     @Published var accounts: [AccountProfile] = []

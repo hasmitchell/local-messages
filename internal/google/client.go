@@ -420,6 +420,9 @@ func (c *Client) Download(ctx context.Context, store *archive.Store, since time.
 				a.State = "excluded_by_media_filter"
 				continue
 			}
+			if !a.Due(time.Now()) {
+				continue
+			}
 			// Full-size metadata can fill in an initially unknown size. Check again
 			// after resolution before downloading any bytes into memory.
 			if a.Size > 64<<20 {
@@ -442,6 +445,7 @@ func (c *Client) Download(ctx context.Context, store *archive.Store, since time.
 						originalFailures = 0
 					} else {
 						a.State = "original_request_failed"
+						a.RecordFailure(time.Now())
 						originalFailures++
 						if originalFailures >= 3 {
 							if saveErr := store.UpdateMedia(m); saveErr != nil {
@@ -465,6 +469,7 @@ func (c *Client) Download(ctx context.Context, store *archive.Store, since time.
 			data, fetchErr := c.GM.DownloadMedia(a.MediaID, a.Key)
 			if fetchErr != nil {
 				a.State = "download_failed"
+				a.RecordFailure(time.Now())
 				continue
 			}
 			if int64(len(data)) > budget {
@@ -496,6 +501,7 @@ func (c *Client) Download(ctx context.Context, store *archive.Store, since time.
 			budget -= int64(len(data))
 			a.State = "downloaded_original"
 			a.Path = filepath.Join("media", name)
+			a.Attempts, a.NextAttempt = 0, 0
 			if c.MediaProgress != nil {
 				c.MediaProgress("Saved an original attachment.")
 			}

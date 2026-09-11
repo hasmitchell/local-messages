@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"local/GoogleMessagingAppMac/internal/archive"
@@ -61,6 +62,8 @@ type commandRouter struct {
 	mu      sync.Mutex
 	session *sendSession
 	store   *archive.Store
+	// presence is true while the app is in front; the session polls less when idle.
+	presence *atomic.Bool
 }
 
 func (r *commandRouter) set(session *sendSession) { r.mu.Lock(); r.session = session; r.mu.Unlock() }
@@ -81,6 +84,12 @@ func (r *commandRouter) run(ctx context.Context, commands <-chan archive.SendCom
 	}
 }
 func (r *commandRouter) execute(command archive.SendCommand, session *sendSession) error {
+	if command.Kind == "presence" {
+		if command.Valid() && r.presence != nil {
+			r.presence.Store(command.Body == "active")
+		}
+		return nil
+	}
 	if command.IsStart() {
 		return r.start(command, session)
 	}

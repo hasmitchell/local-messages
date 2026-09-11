@@ -2,12 +2,15 @@ package live
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"local/GoogleMessagingAppMac/internal/archive"
 	"local/GoogleMessagingAppMac/internal/history"
 )
+
+var errBackfillDeferred = errors.New("history backfill deferred to keep the phone's workload bounded")
 
 func needsHistory(store *archive.Store, id string, since time.Time) (bool, error) {
 	coverage, err := store.Meta("history_coverage:" + id)

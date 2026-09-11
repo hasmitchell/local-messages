@@ -48,6 +48,9 @@ func (c SendCommand) Valid() bool {
 	if c.Kind == "start" {
 		return c.ConversationID == "" && c.Body == "" && len(c.Files) == 0 && c.MessageID == "" && c.Emoji == "" && phoneNumberPattern.MatchString(c.Number)
 	}
+	if c.Kind == "presence" {
+		return c.ConversationID == "" && (c.Body == "active" || c.Body == "idle") && len(c.Files) == 0 && c.MessageID == "" && c.Emoji == "" && c.Number == ""
+	}
 	if c.Kind == "mark_read" {
 		return c.ConversationID != "" && len(c.ConversationID) <= 512 && c.MessageID != "" && len(c.MessageID) <= 512 && c.Body == "" && len(c.Files) == 0 && c.Emoji == "" && c.Number == ""
 	}

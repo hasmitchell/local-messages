@@ -7,6 +7,7 @@ import (
 	"github.com/google/uuid"
 	"go.mau.fi/mautrix-gmessages/pkg/libgm"
 	"io"
+	"sync/atomic"
 	"time"
 
 	"go.mau.fi/mautrix-gmessages/pkg/libgm/gmproto"
@@ -18,6 +19,8 @@ type Options struct {
 	Commands                    <-chan archive.SendCommand
 	Since                       time.Time
 	MaxPages, ConversationLimit int
+	// Presence is set by the app: true while it is in front. Nil means active.
+	Presence *atomic.Bool
 	Media                       string
 	MediaBudget                 int64
 	RetentionDays               int
@@ -49,7 +52,10 @@ func watch(ctx context.Context, store *archive.Store, opts Options, output io.Wr
 	if err := store.RecoverInterruptedSends(); err != nil {
 		return err
 	}
-	router := &commandRouter{store: store}
+	presence := &atomic.Bool{}
+	presence.Store(true)
+	opts.Presence = presence
+	router := &commandRouter{store: store, presence: presence}
 	commandCtx, stopCommands := context.WithCancel(ctx)
 	commandDone := make(chan struct{})
 	go func() { defer close(commandDone); router.run(commandCtx, opts.Commands) }()
@@ -142,9 +148,18 @@ func runSession(ctx context.Context, store *archive.Store, client source, buffer
 	}()
 	retryDirty := map[string]time.Time{}
 	known := map[string]bool{}
+	lastSweep := map[string]time.Time{}
+	nextBackfill := time.Time{}
+	active := func() bool { return opts.Presence == nil || opts.Presence.Load() }
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+		// Every request here is served by the phone, so the cadence follows
+		// whether anyone is looking: fresh messages still arrive through events.
+		inventoryInterval, sweepInterval, mediaInterval, backfillPace := 5*time.Minute, 30*time.Minute, 5*time.Minute, 2*time.Second
+		if !active() {
+			inventoryInterval, sweepInterval, mediaInterval, backfillPace = 15*time.Minute, 2*time.Hour, 15*time.Minute, 10*time.Second
 		}
 		opts.Since = (archive.Settings{RetentionDays: opts.RetentionDays}).Cutoff(opts.Since, time.Now().UTC())
 		if opts.RetentionDays > 0 && !mediaRunning && time.Now().After(nextCleanup) {
@@ -192,21 +207,24 @@ func runSession(ctx context.Context, store *archive.Store, client source, buffer
 					if err = store.PutConversation(conv); err != nil {
 						return err
 					}
-					// Always refresh recently active threads (receipts/reactions
-					// need not change their activity timestamp), plus any gap.
+					// Refresh threads with new activity or missing history at once;
+					// recently active threads are swept on a slower cadence so
+					// receipts and reactions that carry no event still arrive.
 					needsHistory, err := needsHistory(store, conv.ID, opts.Since)
 					if err != nil {
 						return err
 					}
-					if !conv.LastMessage.Before(opts.Since) && (needsHistory || latest.IsZero() || conv.LastMessage.After(latest) || conv.LastMessage.After(time.Now().Add(-7*24*time.Hour))) {
+					recent := conv.LastMessage.After(time.Now().Add(-7*24*time.Hour)) && time.Since(lastSweep[conv.ID]) > sweepInterval
+					if !conv.LastMessage.Before(opts.Since) && (needsHistory || latest.IsZero() || conv.LastMessage.After(latest) || recent) {
 						if _, exists := retryDirty[conv.ID]; !exists {
 							retryDirty[conv.ID] = time.Time{}
 						}
+						lastSweep[conv.ID] = time.Now()
 					}
 					known[conv.ID] = true
 				}
 			}
-			nextInventory = time.Now().Add(2 * time.Minute)
+			nextInventory = time.Now().Add(inventoryInterval)
 			if err := refreshAvatars(ctx, store, client, avatarBatchLimit); err != nil {
 				return err
 			}
@@ -234,6 +252,19 @@ func runSession(ctx context.Context, store *archive.Store, client source, buffer
 				if err := CatchUp(ctx, store, client, id, opts.Since, changedAt, opts.MaxPages); err != nil {
 					return err
 				}
+				// Older history is imported one page at a time at a bounded pace;
+				// a deferred page keeps the thread queued for the next loop.
+				if time.Now().Before(nextBackfill) {
+					needed, err := needsHistory(store, id, opts.Since)
+					if err != nil {
+						return err
+					}
+					if needed {
+						return errBackfillDeferred
+					}
+					return nil
+				}
+				nextBackfill = time.Now().Add(backfillPace)
 				return backfillHistory(ctx, store, client, id, opts)
 			}); err != nil {
 				if ctx.Err() != nil {
@@ -251,7 +282,7 @@ func runSession(ctx context.Context, store *archive.Store, client source, buffer
 		select {
 		case mediaErr := <-mediaDone:
 			mediaRunning = false
-			nextMedia = time.Now().Add(5 * time.Minute)
+			nextMedia = time.Now().Add(mediaInterval)
 			photosIncomplete = mediaErr != nil
 			if err := store.CollectMedia(); err != nil {
 				return err

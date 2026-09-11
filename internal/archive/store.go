@@ -24,6 +24,27 @@ type Attachment struct {
 	Key      []byte `json:"key,omitempty"`
 	Path     string `json:"path,omitempty"`
 	State    string `json:"state"`
+	// Failed original lookups back off so the phone is not asked again every batch.
+	Attempts    int   `json:"attempts,omitempty"`
+	NextAttempt int64 `json:"next_attempt,omitempty"`
+}
+
+// Due reports whether an attachment may be requested from the phone now.
+func (a Attachment) Due(now time.Time) bool { return a.NextAttempt == 0 || now.UnixMicro() >= a.NextAttempt }
+
+// RecordFailure schedules the next lookup: 1 hour, then 6, then a day, then weekly.
+func (a *Attachment) RecordFailure(now time.Time) {
+	a.Attempts++
+	delay := 7 * 24 * time.Hour
+	switch a.Attempts {
+	case 1:
+		delay = time.Hour
+	case 2:
+		delay = 6 * time.Hour
+	case 3:
+		delay = 24 * time.Hour
+	}
+	a.NextAttempt = now.Add(delay).UnixMicro()
 }
 
 type Reaction struct {
@@ -437,6 +458,7 @@ func (s *Store) UpdateMedia(m Message) error {
 			}
 			fresh.MediaID, fresh.Key, fresh.Size = update.MediaID, update.Key, update.Size
 			fresh.MIME, fresh.Path, fresh.State = update.MIME, update.Path, update.State
+			fresh.Attempts, fresh.NextAttempt = update.Attempts, update.NextAttempt
 			if update.ActionID != "" {
 				fresh.ActionID = update.ActionID
 			}

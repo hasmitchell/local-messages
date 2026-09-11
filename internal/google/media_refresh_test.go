@@ -80,6 +80,23 @@ func TestRefreshStopsAfterFindingMessageWithoutOriginal(t *testing.T) {
 	if err != nil || n != 0 || source.calls != 1 {
 		t.Fatalf("unnecessary scan: %d %v", source.calls, err)
 	}
+	// A completed lookup without an original is remembered, so the next batch
+	// does not scan the same history again until the backoff has passed.
+	if a := messages[0].Attachments[0]; a.Attempts != 1 || a.NextAttempt == 0 || a.Due(time.Now()) {
+		t.Fatalf("missing backoff after a failed lookup: %+v", a)
+	}
+	n, err = refreshMedia(context.Background(), nil, source, messages, "photos", 1024)
+	if err != nil || n != 0 || source.calls != 1 {
+		t.Fatalf("scanned again during backoff: %d %v", source.calls, err)
+	}
+	messages[0].Attachments[0].NextAttempt = time.Now().Add(-time.Second).UnixMicro()
+	retry := &mediaHistory{pages: []history.Page{{Messages: []archive.Message{{ID: "m", ConversationID: "c"}}, Cursor: json.RawMessage(`{"next":1}`)}}}
+	if _, err = refreshMedia(context.Background(), nil, retry, messages, "photos", 1024); err != nil || retry.calls != 1 {
+		t.Fatalf("expected a retry once due: %d %v", retry.calls, err)
+	}
+	if a := messages[0].Attachments[0]; a.Attempts != 2 || time.UnixMicro(a.NextAttempt).Sub(time.Now()) < 5*time.Hour {
+		t.Fatalf("backoff should lengthen: %+v", a)
+	}
 }
 
 func TestRefreshHonoursBudgetAndMediaFilter(t *testing.T) {
