@@ -239,5 +239,7 @@ private struct SidebarStatusBar: View {
             .padding(.horizontal, 14).padding(.vertical, 8)
             .help(model.canSync ? model.syncState.help : "Saved conversations and search work without a phone connection.")
         }
+        // The list scrolls beneath this inset, so the bar needs its own backdrop.
+        .background(.bar)
     }
 }
