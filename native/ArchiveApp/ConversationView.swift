@@ -192,20 +192,16 @@ private struct MessageTimeline: View {
             .modifier(ScrollEdgeObserver(edge: .bottom) { model.timelineAtBottom = $0 })
             .overlay(alignment: .bottomTrailing) {
                 if model.hasLater || !model.timelineAtBottom {
-                    Button {
+                    FloatingJumpButton(symbol: "arrow.down", title: "Jump to latest messages") {
                         if model.hasLater { model.showLatest() }
                         else {
                             model.highlightedID = nil
                             withAnimation(.easeOut(duration: 0.2)) { reader.scrollTo("timeline-bottom", anchor: .bottom) }
                         }
-                    } label: { Image(systemName: "arrow.down").font(.system(size: 14, weight: .semibold)).frame(width: 34, height: 34) }
-                        .buttonStyle(.plain).foregroundStyle(archiveAccent)
-                        .background(.regularMaterial, in: Circle())
-                        .overlay(Circle().strokeBorder(.quaternary, lineWidth: 1))
-                        .shadow(color: .black.opacity(0.14), radius: 5, y: 2)
-                        .padding(14).help("Jump to latest messages")
-                        .accessibilityLabel("Jump to latest messages").accessibilityIdentifier("messagesToBottom")
-                        .transition(.scale(scale: 0.5, anchor: .bottomTrailing).combined(with: .opacity))
+                    }
+                    .padding(14)
+                    .accessibilityIdentifier("messagesToBottom")
+                    .transition(.scale(scale: 0.5, anchor: .bottomTrailing).combined(with: .opacity))
                 }
             }
             .animation(Motion.quick, value: model.timelineAtBottom)

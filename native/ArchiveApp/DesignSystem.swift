@@ -46,6 +46,27 @@ extension ButtonStyle where Self == BouncyButtonStyle {
     static var bouncy: BouncyButtonStyle { BouncyButtonStyle() }
 }
 
+// Floating circular control that jumps a scroll view to an edge. The material
+// disc is part of the label, so the whole circle is the hit area and the
+// whole disc squashes on press.
+struct FloatingJumpButton: View {
+    let symbol: String
+    let title: String
+    let action: () -> Void
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: symbol).font(.system(size: 15, weight: .bold)).foregroundStyle(archiveAccent)
+                .frame(width: 38, height: 38)
+                .background(.regularMaterial, in: Circle())
+                .overlay(Circle().strokeBorder(.quaternary, lineWidth: 1))
+                .contentShape(Circle())
+        }
+        .buttonStyle(.bouncy)
+        .shadow(color: .black.opacity(0.18), radius: 6, y: 3)
+        .help(title).accessibilityLabel(title)
+    }
+}
+
 let incomingBubble = Color(nsColor: NSColor(name: nil) { appearance in
     appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
         ? NSColor(white: 1, alpha: 0.13)

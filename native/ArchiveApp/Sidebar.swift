@@ -54,17 +54,15 @@ struct ArchiveSidebar: View {
             }
             .overlay(alignment: .bottom) {
                 if awayFromTop, model.visibleConversations.count > 8, let first = model.visibleConversations.first {
-                    Button {
+                    FloatingJumpButton(symbol: "arrow.up", title: "Back to top") {
                         withAnimation(.easeOut(duration: 0.2)) { reader.scrollTo(first.id, anchor: .top) }
-                    } label: { Label("Back to top", systemImage: "arrow.up") }
-                        .buttonStyle(.plain).font(.caption.weight(.medium))
-                        .padding(.horizontal, 10).padding(.vertical, 6)
-                        .background(.regularMaterial, in: Capsule())
-                        .overlay(Capsule().strokeBorder(.quaternary, lineWidth: 1))
-                        .shadow(color: .black.opacity(0.12), radius: 4, y: 2)
-                        .padding(.bottom, 10).accessibilityIdentifier("conversationsToTop")
+                    }
+                    .padding(.bottom, 12)
+                    .accessibilityIdentifier("conversationsToTop")
+                    .transition(.scale(scale: 0.5, anchor: .bottom).combined(with: .opacity))
                 }
             }
+            .animation(Motion.quick, value: awayFromTop)
         }
     }
 }
