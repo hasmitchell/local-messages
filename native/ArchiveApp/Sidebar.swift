@@ -45,6 +45,7 @@ struct ArchiveSidebar: View {
             .modifier(ScrollEdgeObserver(edge: .top) { awayFromTop = !$0 })
             .onAppear { if #unavailable(macOS 15) { awayFromTop = true } }
             .listStyle(.sidebar).scrollContentBackground(.hidden)
+            .modifier(LegibleToolbarEdge())
             .animation(Motion.spring, value: model.visibleConversations.map(\.id))
             .overlay {
                 if model.visibleConversations.isEmpty && !model.loading {

@@ -201,6 +201,11 @@ func runSession(ctx context.Context, store *archive.Store, client source, buffer
 				return err
 			}
 		}
+		for id, update := range p.unread {
+			if err := store.UpdateUnread(id, update.unread, update.lastMessage); err != nil {
+				return err
+			}
+		}
 		if p.save {
 			saveCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			err := client.Save(saveCtx)

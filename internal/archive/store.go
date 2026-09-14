@@ -180,6 +180,13 @@ func (s *Store) SetUnread(id string, unread bool) error {
 	return err
 }
 
+// UpdateUnread applies a read-state change reported by the phone, unless the
+// report refers to older activity than the conversation already has saved.
+func (s *Store) UpdateUnread(id string, unread bool, lastMessage time.Time) error {
+	_, err := s.db.Exec(`UPDATE conversations SET unread=? WHERE id=? AND last_message<=?`, unread, id, lastMessage.UnixMicro())
+	return err
+}
+
 func (s *Store) SetMeta(key, value string) error {
 	_, err := s.db.Exec(`INSERT INTO metadata(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, key, value)
 	return err

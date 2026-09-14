@@ -189,6 +189,7 @@ private struct MessageTimeline: View {
                     .frame(maxWidth: .infinity)
             }
             .coordinateSpace(name: "timelineViewport")
+            .modifier(LegibleToolbarEdge())
             .modifier(ScrollEdgeObserver(edge: .bottom) { model.timelineAtBottom = $0 })
             .overlay(alignment: .bottomTrailing) {
                 if model.hasLater || !model.timelineAtBottom {

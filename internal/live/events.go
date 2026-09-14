@@ -12,9 +12,16 @@ import (
 
 type sendEcho struct{ clientID, conversationID, messageID string }
 
+// unreadUpdate is a read-state change the phone reported for a conversation.
+type unreadUpdate struct {
+	unread      bool
+	lastMessage time.Time
+}
+
 type pendingEvents struct {
 	echoes          []sendEcho
 	dirty           map[string]time.Time
+	unread          map[string]unreadUpdate
 	inventory, save bool
 }
 type eventBuffer struct {
@@ -54,6 +61,14 @@ func (b *eventBuffer) observe(event any) {
 	case *gmproto.Conversation:
 		b.pending.inventory = true
 		b.mark(e.GetConversationID(), time.Time{})
+		// Reading on the phone arrives as a conversation update; apply its
+		// read state straight away rather than waiting for the next sweep.
+		if id := e.GetConversationID(); id != "" {
+			if b.pending.unread == nil {
+				b.pending.unread = map[string]unreadUpdate{}
+			}
+			b.pending.unread[id] = unreadUpdate{unread: e.GetUnread(), lastMessage: time.UnixMicro(e.GetLastMessageTimestamp()).UTC()}
+		}
 	case *events.GaiaLoggedOut:
 		b.failure = "pairing_required"
 		b.cancel()

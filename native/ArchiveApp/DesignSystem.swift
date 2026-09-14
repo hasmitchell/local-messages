@@ -26,6 +26,15 @@ extension View {
     func prominentButton() -> some View { buttonStyle(.borderedProminent).tint(archiveProminent) }
 }
 
+// Content scrolls beneath the glass toolbar. macOS 26's soft edge fade leaves
+// the title sitting on message text; the hard style puts a translucent band
+// under the toolbar so the title stays legible while the glass look remains.
+struct LegibleToolbarEdge: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(macOS 26, *) { content.scrollEdgeEffectStyle(.hard, for: .top) } else { content }
+    }
+}
+
 // One vocabulary of motion for the whole app.
 enum Motion {
     static let spring = Animation.spring(response: 0.38, dampingFraction: 0.78)
