@@ -31,3 +31,28 @@ func (a Attachment) IncludedIn(mode string) bool {
 		return false
 	}
 }
+
+// Extension names a saved file by its media type, never by a remote filename.
+func (a Attachment) Extension() string {
+	if a.IsContact() {
+		return ".vcf"
+	}
+	switch a.MediaType() {
+	case "image/jpeg":
+		return ".jpg"
+	case "image/png":
+		return ".png"
+	case "image/gif":
+		return ".gif"
+	case "image/webp":
+		return ".webp"
+	case "image/heic":
+		return ".heic"
+	case "video/mp4":
+		return ".mp4"
+	case "application/pdf":
+		return ".pdf"
+	default:
+		return ".bin"
+	}
+}

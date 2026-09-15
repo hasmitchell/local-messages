@@ -24,13 +24,17 @@ type Attachment struct {
 	Key      []byte `json:"key,omitempty"`
 	Path     string `json:"path,omitempty"`
 	State    string `json:"state"`
+	// Source is "sent" for an original kept from this Mac's own upload.
+	Source string `json:"source,omitempty"`
 	// Failed original lookups back off so the phone is not asked again every batch.
 	Attempts    int   `json:"attempts,omitempty"`
 	NextAttempt int64 `json:"next_attempt,omitempty"`
 }
 
 // Due reports whether an attachment may be requested from the phone now.
-func (a Attachment) Due(now time.Time) bool { return a.NextAttempt == 0 || now.UnixMicro() >= a.NextAttempt }
+func (a Attachment) Due(now time.Time) bool {
+	return a.NextAttempt == 0 || now.UnixMicro() >= a.NextAttempt
+}
 
 // RecordFailure schedules the next lookup: 1 hour, then 6, then a day, then weekly.
 func (a *Attachment) RecordFailure(now time.Time) {
@@ -300,12 +304,14 @@ func putMessages(tx *sql.Tx, messages []Message) error {
 			for i := range m.Attachments {
 				for _, a := range old.Attachments {
 					fresh := &m.Attachments[i]
-					if fresh.ID != a.ID || a.State != "downloaded_original" || (fresh.MediaID != "" && fresh.MediaID != a.MediaID) {
+					if fresh.ID != a.ID || a.State != "downloaded_original" || (a.Source != "sent" && fresh.MediaID != "" && fresh.MediaID != a.MediaID) {
 						continue
 					}
 					// History can omit references that were resolved separately by a
 					// full-size request. Keep those originals across a text refresh.
-					// A different, nonempty media ID still invalidates the cached file.
+					// A different, nonempty media ID still invalidates the cached file,
+					// except for a file sent from this Mac: those bytes are the original.
+					fresh.Source = a.Source
 					if fresh.MediaID == "" {
 						fresh.MediaID = a.MediaID
 						fresh.Key = a.Key
@@ -466,6 +472,7 @@ func (s *Store) UpdateMedia(m Message) error {
 			}
 			fresh.MediaID, fresh.Key, fresh.Size = update.MediaID, update.Key, update.Size
 			fresh.MIME, fresh.Path, fresh.State = update.MIME, update.Path, update.State
+			fresh.Source = update.Source
 			fresh.Attempts, fresh.NextAttempt = update.Attempts, update.NextAttempt
 			if update.ActionID != "" {
 				fresh.ActionID = update.ActionID

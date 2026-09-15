@@ -205,6 +205,7 @@ Status meanings:
 | `unordered_page`, `invalid_timestamp`, `invalid_message` | Returned data did not support a trustworthy cutoff decision |
 | `downloaded_original` | Media bytes were downloaded and written locally |
 | `original_unavailable` | Initial metadata lacks an original reference/key; full-size resolution has not succeeded yet |
+| `downloaded_original` with `source: sent` | A file sent from this Mac, kept from its staged upload; the phone's record of an outgoing MMS often carries no download reference |
 | `original_request_failed` | Requesting full-size metadata failed or produced no usable message update; a thumbnail is not substituted |
 
 **Overall conversation inventory remains unverified.** The pinned upstream public method accepts a requested count but no conversation cursor. The probe requests inbox and archive separately, up to 1,000 each by default. It never calls that a complete inbox inventory. Spam/blocked threads are excluded. A phone comparison or a small upstream pagination enhancement is needed before claiming a complete one-year archive.

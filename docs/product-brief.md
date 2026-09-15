@@ -100,3 +100,7 @@ Typing indicators run both ways: the worker forwards the phone's typing events (
 ### Read state from the phone and a legible title — version 0.8.2 (14 September 2026)
 
 Reading a conversation on the phone now clears its unread marker on the Mac within seconds: the worker applies the read state carried by the phone's conversation events immediately, guarded so a replayed event about older activity cannot undo a newer state. On macOS 26 the timeline and sidebar use the hard scroll-edge style, which puts a translucent band beneath the glass toolbar so the conversation title no longer sits directly on message text. The floating jump buttons in the timeline and sidebar now share one control with a full circular hit area and press feedback.
+
+### Sent photos stay visible — version 0.8.3 (15 September 2026)
+
+An image sent from the Mac showed "Not saved on this Mac" once the phone confirmed it: the phone's record of an outgoing MMS carries no media reference or key, so the worker had nothing to download. The worker now keeps the staged upload itself as the message's local original (marked `source: sent`) as soon as the send is confirmed, and a later history page carrying the phone's own reference no longer displaces it. Ambiguous matches, altered staged files and mismatched media kinds are left alone. Checked with Go tests; the live case is verified on the existing sent message when the worker's media pass runs.

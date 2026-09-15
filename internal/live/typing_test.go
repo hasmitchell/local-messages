@@ -15,7 +15,10 @@ type fakeTyper struct {
 	calls []string
 }
 
-func (f *fakeTyper) Typing(_ context.Context, id string) error { f.calls = append(f.calls, id); return nil }
+func (f *fakeTyper) Typing(_ context.Context, id string) error {
+	f.calls = append(f.calls, id)
+	return nil
+}
 
 type fakeContacts struct {
 	fakeSource

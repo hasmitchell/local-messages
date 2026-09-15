@@ -111,6 +111,7 @@ func (s *Store) ReserveSend(c SendCommand) (bool, error) {
 	}
 	return true, tx.Commit()
 }
+
 // ReserveStart records the intent to open a conversation with a number. The
 // row has no conversation until the phone answers; the result lands in remote_id.
 func (s *Store) ReserveStart(c SendCommand) (bool, error) {

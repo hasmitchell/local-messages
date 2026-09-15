@@ -20,9 +20,9 @@ import (
 	"go.mau.fi/mautrix-gmessages/pkg/libgm"
 	"go.mau.fi/mautrix-gmessages/pkg/libgm/events"
 	"go.mau.fi/mautrix-gmessages/pkg/libgm/gmproto"
-	"google.golang.org/protobuf/proto"
 	"go.mau.fi/util/exhttp"
 	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 	"local/GoogleMessagingAppMac/internal/archive"
 	"local/GoogleMessagingAppMac/internal/history"
 )
@@ -439,6 +439,11 @@ func Convert(raw *gmproto.Message) archive.Message {
 }
 
 func (c *Client) Download(ctx context.Context, store *archive.Store, since time.Time, mode string, budget int64) error {
+	// Files sent from this Mac need no download: keep them before asking the
+	// phone for references it may not have for its own outgoing MMS.
+	if _, err := store.AdoptSentOriginals(); err != nil {
+		return err
+	}
 	if mode == "none" {
 		return nil
 	}
@@ -570,26 +575,4 @@ func (c *Client) Download(ctx context.Context, store *archive.Store, since time.
 	}
 	return nil
 }
-func mediaExtension(a archive.Attachment) string {
-	if a.IsContact() {
-		return ".vcf"
-	}
-	switch a.MediaType() {
-	case "image/jpeg":
-		return ".jpg"
-	case "image/png":
-		return ".png"
-	case "image/gif":
-		return ".gif"
-	case "image/webp":
-		return ".webp"
-	case "image/heic":
-		return ".heic"
-	case "video/mp4":
-		return ".mp4"
-	case "application/pdf":
-		return ".pdf"
-	default:
-		return ".bin"
-	}
-}
+func mediaExtension(a archive.Attachment) string { return a.Extension() }

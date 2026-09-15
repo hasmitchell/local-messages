@@ -23,10 +23,10 @@ type Options struct {
 	Since                       time.Time
 	MaxPages, ConversationLimit int
 	// Presence is set by the app: true while it is in front. Nil means active.
-	Presence *atomic.Bool
-	Media                       string
-	MediaBudget                 int64
-	RetentionDays               int
+	Presence      *atomic.Bool
+	Media         string
+	MediaBudget   int64
+	RetentionDays int
 }
 
 // Status is the complete IPC contract. Never add message content, account names,
@@ -211,6 +211,13 @@ func runSession(ctx context.Context, store *archive.Store, client source, buffer
 			err := client.Save(saveCtx)
 			cancel()
 			credentialProblem = err != nil
+		}
+		if len(p.echoes) > 0 || p.save {
+			// A sent photo shows at once from the staged upload, without
+			// waiting for the next media pass.
+			if _, err := store.AdoptSentOriginals(); err != nil {
+				return err
+			}
 		}
 		for id, at := range p.dirty {
 			previous, exists := retryDirty[id]
