@@ -64,6 +64,32 @@ enum SnapshotRunner {
                     try? JSONSerialization.data(withJSONObject: metrics, options: [.prettyPrinted, .sortedKeys]).write(to: directory.appendingPathComponent("idle.json"))
                     exit(0)
                 }
+                if let count = Int(value("--sidebar-toggle") ?? "") {
+                    if let id = value("--conversation") { model.select(id); while model.loadingMessages { try? await Task.sleep(for: .milliseconds(20)) } }
+                    if arguments.contains("--no-conversation") { model.selectedID = nil }
+                    try? await Task.sleep(for: .seconds(1))
+                    var stalls: [Double] = [], costs: [Double] = [], mainCosts: [Double] = [], widths: [String] = [], dropped: [Int] = [], frameCounts: [Int] = []
+                    let renders = await RenderCount.during {
+                        for _ in 0..<count {
+                            try? await Task.sleep(for: .milliseconds(400))
+                            let start = ResponsivenessRunner.cpuNow(), mainStart = ResponsivenessRunner.threadCPU()
+                            let before = ResponsivenessRunner.sidebarWidth()
+                            let frames = await ResponsivenessRunner.frames {
+                                ResponsivenessRunner.toggleSidebar()
+                                try? await Task.sleep(for: .milliseconds(700))
+                            }
+                            stalls.append(frames.worstMS); dropped.append(frames.over12ms); frameCounts.append(frames.count)
+                            costs.append((ResponsivenessRunner.cpuNow() - start) * 1000)
+                            mainCosts.append((ResponsivenessRunner.threadCPU() - mainStart) * 1000)
+                            widths.append("\(Int(before))→\(Int(ResponsivenessRunner.sidebarWidth()))")
+                        }
+                    }
+                    try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                    let metrics: [String: Any] = ["worst_frame_ms_median": stalls.sorted()[stalls.count / 2], "worst_frame_ms_max": stalls.max() ?? 0, "long_frames": dropped, "frames": frameCounts,
+                                                  "toggle_cpu_ms_median": costs.sorted()[costs.count / 2], "toggle_main_cpu_ms_median": mainCosts.sorted()[mainCosts.count / 2], "redraws_per_toggle": renders.mapValues { $0 / count }, "messages": model.messages.count, "sidebar_widths": widths]
+                    try? JSONSerialization.data(withJSONObject: metrics, options: [.prettyPrinted, .sortedKeys]).write(to: directory.appendingPathComponent("idle.json"))
+                    exit(0)
+                }
                 if let ids = value("--landing")?.split(separator: ",").map(String.init) {
                     var results: [[String: Any]] = []
                     for round in 0..<2 {

@@ -163,19 +163,29 @@ private struct MessageTimeline: View {
     @Environment(ArchiveModel.self) private var model
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let conversation: ConversationRecord
+    /// Rows depend only on the bubble width, which is fixed at normal window
+    /// sizes and moves in 20 pt steps below them. Tracking just that value (not
+    /// a GeometryReader) keeps a resize or sidebar slide from rebuilding the
+    /// timeline on every animation frame.
+    @State private var bubbleWidth: CGFloat = 540
+    @State private var viewportHeight: CGFloat = 0
+    private static func bubbleWidth(for width: CGFloat) -> CGFloat {
+        let contentWidth = min(1100, width) - 36
+        return (min(540, max(240, contentWidth * 0.72)) / 20).rounded(.down) * 20
+    }
 
     var body: some View {
         #if UI_SNAPSHOTS
         let _ = RenderCount.bump("timeline")
         #endif
-        GeometryReader { geometry in
+        // Worked out when messages change, not on each frame of a resize.
+        let pending = model.displayedOutbox
+        let entries = timelineEntries(model.messages, outbox: pending.filter { !$0.isReaction }, submissions: model.messageSubmissions, group: conversation.isGroup)
+        let context = BubbleContext(model: model, conversation: conversation)
+        let bubbles = context.states(model.messages, highlighted: model.highlightedID)
+        let newSend = "outbox-" + model.sendPulse.uuidString.lowercased()
         ScrollViewReader { reader in
             ScrollView {
-                let pending = model.displayedOutbox
-                let entries = timelineEntries(model.messages, outbox: pending.filter { !$0.isReaction }, submissions: model.messageSubmissions, group: conversation.isGroup)
-                let context = BubbleContext(model: model, conversation: conversation)
-                let contentWidth = min(1100, geometry.size.width) - 36
-                let bubbleWidth = min(540, max(240, contentWidth * 0.72))
                 // Message pages are fetched after the selection reaches the UI.
                 // Eager layout keeps scroll anchors exact for variable-height media.
                 // A LazyVStack was tried (0.8.7): estimated row heights made
@@ -184,9 +194,8 @@ private struct MessageTimeline: View {
                     if model.hasEarlier {
                         LoadMoreButton(title: "Show Earlier Messages") { model.loadMore(earlier: true) }.disabled(model.paging).padding(.bottom, 6)
                     }
-                    TimelineRows(model: model, entries: entries, bubbles: context.states(model.messages, highlighted: model.highlightedID),
-                                 directory: context.directory, canReply: context.canReply, bubbleWidth: bubbleWidth, contentWidth: contentWidth,
-                                 newSend: "outbox-" + model.sendPulse.uuidString.lowercased())
+                    TimelineRows(model: model, entries: entries, bubbles: bubbles,
+                                 directory: context.directory, canReply: context.canReply, bubbleWidth: bubbleWidth, newSend: newSend)
                         .equatable()
                     ForEach(pending.filter(\.isReaction)) { pending in
                         Text("Reaction \(pending.command?.emoji ?? "") · \(pending.label)").font(.caption)
@@ -217,7 +226,7 @@ private struct MessageTimeline: View {
             .animation(Motion.quick, value: model.hasLater)
             .onPreferenceChange(TimelineBottomPreference.self) { bottom in
                 if #unavailable(macOS 15) {
-                    let atBottom = bottom >= 0 && bottom <= geometry.size.height + 60
+                    let atBottom = bottom >= 0 && bottom <= viewportHeight + 60
                     if model.timelineAtBottom != atBottom { model.timelineAtBottom = atBottom }
                 }
             }
@@ -236,7 +245,11 @@ private struct MessageTimeline: View {
                 if let request = model.scrollRequest { reader.scrollTo(request.atBottom ? "timeline-bottom" : request.messageID, anchor: request.atBottom ? .bottom : .center) }
             }
         }
-        }
+        .onGeometryChange(for: CGFloat.self) { Self.bubbleWidth(for: $0.size.width) } action: { bubbleWidth = $0 }
+        .onGeometryChange(for: CGFloat.self) { proxy in
+            // Only macOS 14 reads the viewport height (see BottomEdgeProbe).
+            if #available(macOS 15, *) { 0 } else { proxy.size.height }
+        } action: { viewportHeight = $0 }
     }
 }
 
@@ -250,11 +263,10 @@ private struct TimelineRows: View, Equatable {
     let directory: URL?
     let canReply: Bool
     let bubbleWidth: CGFloat
-    let contentWidth: CGFloat
     let newSend: String
     nonisolated static func == (a: Self, b: Self) -> Bool {
         a.model === b.model && a.entries == b.entries && a.bubbles == b.bubbles && a.directory == b.directory && a.canReply == b.canReply
-            && a.bubbleWidth == b.bubbleWidth && a.contentWidth == b.contentWidth && a.newSend == b.newSend
+            && a.bubbleWidth == b.bubbleWidth && a.newSend == b.newSend
     }
     var body: some View {
         #if UI_SNAPSHOTS
@@ -268,12 +280,12 @@ private struct TimelineRows: View, Equatable {
                 case .message(let message, let first, let last, let showsSender, let showsStatus):
                     let state = bubbles[message.id] ?? BubbleState()
                     MessageBubble(model: model, message: message, first: first, last: last, showsSender: showsSender, showsStatus: showsStatus,
-                                  highlighted: state.highlighted, maxWidth: bubbleWidth, spare: max(24, contentWidth - bubbleWidth),
+                                  highlighted: state.highlighted, maxWidth: bubbleWidth,
                                   directory: directory, canReply: canReply, reactable: state.reactable,
                                   ownReaction: state.ownReaction, replyOriginal: state.original)
                         .id(message.id)
                 case .pending(let message, let first):
-                    OutboxBubble(message: message, spare: contentWidth - bubbleWidth, first: first)
+                    OutboxBubble(message: message, maxWidth: bubbleWidth, first: first)
                 }
             }
             .modifier(SendBubbleEntrance(isNewSend: entry.id == newSend))
@@ -433,8 +445,6 @@ private struct MessageBubble: View {
     let showsStatus: Bool
     let highlighted: Bool
     let maxWidth: CGFloat
-    /// Space kept free beside the bubble; limiting the proposal this way lets the bubble hug its text.
-    let spare: CGFloat
     let directory: URL?
     let canReply: Bool
     let reactable: Bool
@@ -442,7 +452,9 @@ private struct MessageBubble: View {
     /// The replied-to message when it is in the loaded page.
     let replyOriginal: MessageRecord?
     @State private var hovering = false
-    /// The reaction menu is an AppKit pop-up button; build it only once the pointer has visited.
+    /// Hover controls (time, reply, and the reaction menu, an AppKit pop-up
+    /// button) exist only once the pointer has visited. Hundreds of invisible
+    /// copies would otherwise be redrawn on every frame of a resize or sidebar slide.
     @State private var hovered = false
 
     private var shape: UnevenRoundedRectangle {
@@ -466,28 +478,47 @@ private struct MessageBubble: View {
             && message.attachments.allSatisfy(\.isImage) && localURLs.count == message.attachments.count
     }
 
+    // Every loaded row is laid out again on each frame of a window resize or
+    // sidebar slide, so the common case (no sender line, no status line, plain
+    // text) uses as few layout layers as possible.
     var body: some View {
-        VStack(alignment: message.outgoing ? .trailing : .leading, spacing: 3) {
-            if showsSender {
-                Text(verbatim: message.sender).font(.caption).foregroundStyle(.secondary).padding(.horizontal, 12).padding(.top, 2)
-            }
-            HStack(spacing: 0) {
-                if message.outgoing { Spacer(minLength: spare) }
-                // Priority sizes the bubble before the spacer, so text wraps at the
-                // intended width and short messages still hug their content.
-                bubble.overlay(alignment: message.outgoing ? .leading : .trailing) { sideDetails }.layoutPriority(1)
-                if !message.outgoing { Spacer(minLength: spare) }
-            }
-            if showsStatus, !statusLine.isEmpty {
-                Text(statusLine).font(.caption2).foregroundStyle(message.status.contains("FAILED") ? .red : .secondary).frame(minHeight: 14).padding(.horizontal, 6)
-            }
-        }
+        rowContent
         .padding(.top, first ? 8 : 2)
         .padding(.bottom, message.reactions.isEmpty ? 0 : 12)
         // The whole row, including the empty space beside the bubble, keeps the
         // hover controls visible while the pointer travels to them.
         .contentShape(Rectangle())
-        .onHover { hovering = $0; if $0 { hovered = true } }
+        .onHover { inside in
+            guard inside, !hovered else { hovering = inside; return }
+            // Build the controls hidden first, then reveal them on the next
+            // update so they fade in exactly as on later hovers.
+            hovered = true
+            Task { @MainActor in hovering = true }
+        }
+    }
+
+    @ViewBuilder private var rowContent: some View {
+        let status = showsStatus && !statusLine.isEmpty
+        if showsSender || status {
+            VStack(alignment: message.outgoing ? .trailing : .leading, spacing: 3) {
+                if showsSender {
+                    Text(verbatim: message.sender).font(.caption).foregroundStyle(.secondary).padding(.horizontal, 12).padding(.top, 2)
+                }
+                placedBubble
+                if status {
+                    Text(statusLine).font(.caption2).foregroundStyle(message.status.contains("FAILED") ? .red : .secondary).frame(minHeight: 14).padding(.horizontal, 6)
+                }
+            }
+        } else { placedBubble }
+    }
+    // Frames rather than an HStack with spacers: the text is measured at one
+    // fixed width, short messages still hug their content, and at least
+    // 24 pt stays free on the far side.
+    private var placedBubble: some View {
+        bubble.overlay(alignment: message.outgoing ? .leading : .trailing) { if hovered { sideDetails } }
+            .frame(maxWidth: maxWidth, alignment: message.outgoing ? .trailing : .leading)
+            .padding(message.outgoing ? .leading : .trailing, 24)
+            .frame(maxWidth: .infinity, alignment: message.outgoing ? .trailing : .leading)
     }
 
     // Time, transport and reaction controls sit beside the bubble without taking part in its layout.
@@ -506,20 +537,15 @@ private struct MessageBubble: View {
             .accessibilityHidden(!hovering)
     }
     private var reactButton: some View {
-        // The menu is an AppKit pop-up button; build it only once the pointer has
-        // visited. A fixed slot keeps the controls beside it from moving.
-        ZStack {
-            if hovered {
-                Menu { reactionItems } label: {
-                    Image(systemName: "face.smiling").font(.system(size: 15)).foregroundStyle(.secondary)
-                }
-                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
-                .opacity(hovering && reactable ? 1 : 0)
-                .scaleEffect(hovering ? 1 : 0.7)
-                .animation(Motion.quick, value: hovering)
-                .accessibilityLabel("React to message")
-            }
+        // A fixed slot keeps the controls beside the menu from moving.
+        Menu { reactionItems } label: {
+            Image(systemName: "face.smiling").font(.system(size: 15)).foregroundStyle(.secondary)
         }
+        .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+        .opacity(hovering && reactable ? 1 : 0)
+        .scaleEffect(hovering ? 1 : 0.7)
+        .animation(Motion.quick, value: hovering)
+        .accessibilityLabel("React to message")
         .frame(width: 24, height: 20)
     }
     private var replyButton: some View {
@@ -538,16 +564,19 @@ private struct MessageBubble: View {
         if ownReaction != nil { Divider(); Button("Remove My Reaction") { model.react(message, emoji: "") } }
     }
 
-    private var bubble: some View {
-        ZStack(alignment: .leading) {
-            if !message.reactions.isEmpty {
+    @ViewBuilder private var sizedContent: some View {
+        if message.reactions.isEmpty { content } else {
+            ZStack(alignment: .leading) {
                 // A short message still needs room for its reaction badges.
                 ReactionBadges(reactions: message.reactions).hidden().frame(height: 0).padding(.horizontal, 12)
+                content
             }
-            content
         }
+    }
+    private var bubble: some View {
+        sizedContent
         .background(imageOnly ? Color.clear : (message.outgoing ? archiveBubble : incomingBubble), in: shape)
-        .overlay(shape.strokeBorder(highlighted ? archiveAccent : .clear, lineWidth: 2))
+        .overlay { if highlighted { shape.strokeBorder(archiveAccent, lineWidth: 2) } }
         .overlay(alignment: message.outgoing ? .bottomLeading : .bottomTrailing) {
             if !message.reactions.isEmpty {
                 ReactionBadges(reactions: message.reactions).padding(.horizontal, 8).offset(y: 11)
@@ -570,14 +599,23 @@ private struct MessageBubble: View {
         }
     }
 
-    private var content: some View {
+    @ViewBuilder private var content: some View {
+        if message.replyTo == nil, message.attachments.isEmpty, !message.body.isEmpty {
+            bodyText.padding(.horizontal, 12).padding(.vertical, 8)
+                .foregroundStyle(message.outgoing ? Color.white : Color.primary)
+        } else { richContent }
+    }
+    private var bodyText: some View {
+        Text(MessageText.linkified(message.body)).font(.system(size: 14)).lineSpacing(2).textSelection(.enabled)
+            .tint(message.outgoing ? .white : archiveAccent)
+    }
+    private var richContent: some View {
         VStack(alignment: .leading, spacing: 6) {
 
             if let reply = message.replyTo { ReplyQuote(model: model, conversationID: message.conversationID, outgoing: message.outgoing, replyID: reply, original: replyOriginal) }
             ForEach(message.attachments) { attachment in AttachmentView(model: model, directory: directory, attachment: attachment, maxWidth: maxWidth - (imageOnly ? 0 : 24), outgoing: message.outgoing) }
             if !message.body.isEmpty {
-                Text(MessageText.linkified(message.body)).font(.system(size: 14)).lineSpacing(2).textSelection(.enabled)
-                    .tint(message.outgoing ? .white : archiveAccent)
+                bodyText
             } else if message.attachments.isEmpty {
                 Text(message.status.contains("DELETED") ? "Message deleted" : "Message content unavailable").font(.callout).italic().opacity(0.8)
             }
@@ -672,7 +710,7 @@ private struct AttachmentView: View {
 struct OutboxBubble: View {
     @Environment(ArchiveModel.self) private var model
     let message: OutboxRecord
-    let spare: CGFloat
+    let maxWidth: CGFloat
     var first = true
     private var attention: Bool { message.state == "unknown" || message.state == "failed" }
     var body: some View {
@@ -693,7 +731,8 @@ struct OutboxBubble: View {
                     .disabled(!model.draft.body.isEmpty || !model.draft.attachments.isEmpty)
             }
         }
-        .padding(.top, first ? 8 : 2).padding(.leading, max(24, spare)).frame(maxWidth: .infinity, alignment: .trailing)
+        .frame(maxWidth: maxWidth, alignment: .trailing)
+        .padding(.top, first ? 8 : 2).padding(.leading, 24).frame(maxWidth: .infinity, alignment: .trailing)
         .id("outbox-" + message.id)
     }
 }

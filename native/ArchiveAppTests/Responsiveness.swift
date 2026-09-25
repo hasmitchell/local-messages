@@ -1,5 +1,6 @@
 #if UI_SNAPSHOTS
 import AppKit
+import QuartzCore
 import SwiftUI
 
 /// Counts redraws of the large views, so checks can assert that unrelated
@@ -133,6 +134,43 @@ import SwiftUI
         flag.running = false
         await probe.value
         return longest
+    }
+    static func cpuNow() -> Double { cpuSeconds() }
+    /// CPU seconds used by the calling (main) thread alone.
+    static func threadCPU() -> Double {
+        var info = thread_basic_info()
+        var count = mach_msg_type_number_t(MemoryLayout<thread_basic_info>.size / MemoryLayout<integer_t>.size)
+        let thread = mach_thread_self()
+        defer { mach_port_deallocate(mach_task_self_, thread) }
+        _ = withUnsafeMutablePointer(to: &info) { $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { thread_info(thread, thread_flavor_t(THREAD_BASIC_INFO), $0, &count) } }
+        return Double(info.user_time.seconds + info.system_time.seconds) + Double(info.user_time.microseconds + info.system_time.microseconds) / 1_000_000
+    }
+    /// Frame timestamps from the window's display link while `work` runs.
+    final class FrameRecorder: NSObject {
+        var stamps: [CFTimeInterval] = []
+        @objc func tick(_ link: CADisplayLink) { stamps.append(link.timestamp) }
+    }
+    static func frames(_ work: () async -> Void) async -> (count: Int, worstMS: Double, over12ms: Int) {
+        let recorder = FrameRecorder()
+        guard let view = NSApp.windows.first(where: \.isVisible)?.contentView else { await work(); return (0, 0, 0) }
+        let link = view.displayLink(target: recorder, selector: #selector(FrameRecorder.tick(_:)))
+        link.add(to: .main, forMode: .common)
+        await work()
+        link.invalidate()
+        let gaps = zip(recorder.stamps, recorder.stamps.dropFirst()).map { ($1 - $0) * 1000 }
+        return (recorder.stamps.count, gaps.max() ?? 0, gaps.filter { $0 > 12 }.count)
+    }
+    /// Slides the sidebar as its toolbar button does, whether or not this window is key.
+    static func toggleSidebar() {
+        func split(_ view: NSView) -> NSSplitView? { (view as? NSSplitView) ?? view.subviews.lazy.compactMap(split).first }
+        let view = NSApp.windows.filter(\.isVisible).compactMap(\.contentView).compactMap(split).first
+        if let controller = view?.delegate as? NSSplitViewController { controller.toggleSidebar(nil) }
+        else { NSApp.sendAction(#selector(NSSplitViewController.toggleSidebar(_:)), to: nil, from: nil) }
+    }
+    static func sidebarWidth() -> CGFloat {
+        func split(_ view: NSView) -> NSSplitView? { (view as? NSSplitView) ?? view.subviews.lazy.compactMap(split).first }
+        guard let view = NSApp.windows.filter(\.isVisible).compactMap(\.contentView).compactMap(split).first, let first = view.arrangedSubviews.first else { return -1 }
+        return view.isSubviewCollapsed(first) ? 0 : first.frame.width
     }
     private static func cpuSeconds() -> Double {
         var usage = rusage()
