@@ -114,8 +114,8 @@ private struct AvatarButton: View {
 
 // MARK: - Timeline
 
-private struct TimelineEntry: Identifiable, Equatable {
-    enum Kind: Equatable {
+private struct TimelineEntry: Identifiable, Hashable {
+    enum Kind: Hashable {
         case separator(String)
         case message(MessageRecord, first: Bool, last: Bool, showsSender: Bool, showsStatus: Bool)
         case pending(OutboxRecord, first: Bool)
@@ -163,15 +163,21 @@ private struct MessageTimeline: View {
     @Environment(ArchiveModel.self) private var model
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let conversation: ConversationRecord
-    /// Rows depend only on the bubble width, which is fixed at normal window
-    /// sizes and moves in 20 pt steps below them. Tracking just that value (not
-    /// a GeometryReader) keeps a resize or sidebar slide from rebuilding the
-    /// timeline on every animation frame.
+    /// Rows depend only on the bubble width, which stays 540 pt unless the
+    /// conversation is under 600 pt wide and moves in 20 pt steps below that.
+    /// Tracking just that value (not a GeometryReader) keeps a resize or sidebar
+    /// slide from rebuilding the timeline: a width change remeasures every row
+    /// in one frame, which showed as a snap halfway through the slide.
     @State private var bubbleWidth: CGFloat = 540
     @State private var viewportHeight: CGFloat = 0
-    private static func bubbleWidth(for width: CGFloat) -> CGFloat {
+    /// Rows well outside this part of the content are drawn as spacers.
+    @State private var window: ClosedRange<CGFloat>?
+    @State private var heights = RowHeights()
+    @State private var measured = 0
+    private nonisolated static func bubbleWidth(for width: CGFloat) -> CGFloat {
         let contentWidth = min(1100, width) - 36
-        return (min(540, max(240, contentWidth * 0.72)) / 20).rounded(.down) * 20
+        guard contentWidth < 600 else { return 540 }
+        return (max(240, contentWidth * 0.9) / 20).rounded(.down) * 20
     }
 
     var body: some View {
@@ -194,9 +200,16 @@ private struct MessageTimeline: View {
                     if model.hasEarlier {
                         LoadMoreButton(title: "Show Earlier Messages") { model.loadMore(earlier: true) }.disabled(model.paging).padding(.bottom, 6)
                     }
+                    Color.clear.frame(height: 0).onGeometryChange(for: CGFloat.self) { $0.frame(in: .named("timelineContent")).minY } action: { heights.top = $0 }
                     TimelineRows(model: model, entries: entries, bubbles: bubbles,
-                                 directory: context.directory, canReply: context.canReply, bubbleWidth: bubbleWidth, newSend: newSend)
-                        .equatable()
+                                 directory: context.directory, canReply: context.canReply, bubbleWidth: bubbleWidth, newSend: newSend,
+                                 window: window, heights: heights, measured: measured) {
+                        // Coalesce: one redraw once a batch of rows has been measured.
+                        guard !heights.redrawPending else { return }
+                        heights.redrawPending = true
+                        Task { @MainActor in heights.redrawPending = false; measured += 1 }
+                    }
+                    .equatable()
                     ForEach(pending.filter(\.isReaction)) { pending in
                         Text("Reaction \(pending.command?.emoji ?? "") · \(pending.label)").font(.caption)
                             .foregroundStyle(pending.state == "unknown" || pending.state == "failed" ? .orange : .secondary).padding(.top, 8)
@@ -209,7 +222,9 @@ private struct MessageTimeline: View {
                     Color.clear.frame(height: 1).id("timeline-bottom").modifier(BottomEdgeProbe())
                 }.padding(.horizontal, 18).padding(.top, 12).padding(.bottom, 10).frame(maxWidth: 1100)
                     .frame(maxWidth: .infinity)
+                    .coordinateSpace(name: "timelineContent")
             }
+            .modifier(VisibleWindow(window: $window))
             .coordinateSpace(name: "timelineViewport")
             .background(TimelineScrollIntent(onScroll: model.userScrolledTimeline))
             .modifier(LegibleToolbarEdge())
@@ -264,15 +279,44 @@ private struct TimelineRows: View, Equatable {
     let canReply: Bool
     let bubbleWidth: CGFloat
     let newSend: String
+    let window: ClosedRange<CGFloat>?
+    let heights: RowHeights
+    let measured: Int
+    let rowsMeasured: () -> Void
     nonisolated static func == (a: Self, b: Self) -> Bool {
         a.model === b.model && a.entries == b.entries && a.bubbles == b.bubbles && a.directory == b.directory && a.canReply == b.canReply
-            && a.bubbleWidth == b.bubbleWidth && a.newSend == b.newSend
+            && a.bubbleWidth == b.bubbleWidth && a.newSend == b.newSend && a.window == b.window && a.heights === b.heights && a.measured == b.measured
+    }
+    /// Rows drawn in full: those near the visible part of the content, and any
+    /// whose height at this width is not known yet. The rest become spacers of
+    /// exactly their measured height, so scroll positions stay exact.
+    private func fullRows() -> Set<String>? {
+        guard let window, heights.width == bubbleWidth else { return nil }
+        var full = Set<String>(), y = heights.top, known = true
+        for entry in entries {
+            guard known, let height = heights.height(entry.id, key: entry.hashValue) else { known = false; full.insert(entry.id); continue }
+            if y + height >= window.lowerBound && y <= window.upperBound { full.insert(entry.id) }
+            y += height
+        }
+        return full
     }
     var body: some View {
         #if UI_SNAPSHOTS
         let _ = RenderCount.bump("rows")
         #endif
+        let full = fullRows()
         ForEach(entries) { entry in
+            if let full, !full.contains(entry.id), let height = heights.height(entry.id, key: entry.hashValue) {
+                Color.clear.frame(height: height).id(entry.scrollID)
+            } else {
+                row(entry)
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
+                        if heights.record(entry.id, key: entry.hashValue, height: height, width: bubbleWidth) { rowsMeasured() }
+                    }
+            }
+        }
+    }
+    private func row(_ entry: TimelineEntry) -> some View {
             VStack(spacing: 0) {
                 switch entry.kind {
                 case .separator(let label):
@@ -290,7 +334,50 @@ private struct TimelineRows: View, Equatable {
             }
             .modifier(SendBubbleEntrance(isNewSend: entry.id == newSend))
             .transition(.identity)
-        }
+    }
+}
+
+extension TimelineEntry {
+    /// The id scroll requests use: the message id for messages.
+    var scrollID: String {
+        if case .message(let message, _, _, _, _) = kind { return message.id }
+        return id
+    }
+}
+
+/// Measured row heights at one bubble width. Written during layout and not
+/// observed, so recording a height never causes a redraw by itself.
+@MainActor private final class RowHeights {
+    private(set) var width: CGFloat = 0
+    /// Where the first row starts in the scroll content.
+    var top: CGFloat = 0
+    var redrawPending = false
+    private var heights: [String: (key: Int, height: CGFloat)] = [:]
+    func height(_ id: String, key: Int) -> CGFloat? {
+        guard let saved = heights[id], saved.key == key else { return nil }
+        return saved.height
+    }
+    /// True when this adds or changes a height.
+    func record(_ id: String, key: Int, height: CGFloat, width: CGFloat) -> Bool {
+        if width != self.width { heights = [:]; self.width = width }
+        if let saved = heights[id], saved.key == key, abs(saved.height - height) < 0.5 { return false }
+        heights[id] = (key, height)
+        return true
+    }
+}
+
+/// The visible part of the content plus 400 pt either side, in 200 pt steps
+/// so scrolling changes it only now and then.
+private struct VisibleWindow: ViewModifier {
+    @Binding var window: ClosedRange<CGFloat>?
+    func body(content: Content) -> some View {
+        if #available(macOS 15, *) {
+            content.onScrollGeometryChange(for: ClosedRange<CGFloat>.self) { geometry in
+                let visible = geometry.visibleRect, margin: CGFloat = 400, step: CGFloat = 200
+                let lower = ((visible.minY - margin) / step).rounded(.down) * step
+                return lower...max(lower, ((visible.maxY + margin) / step).rounded(.up) * step)
+            } action: { _, value in window = value }
+        } else { content }
     }
 }
 
@@ -451,11 +538,19 @@ private struct MessageBubble: View {
     let ownReaction: String?
     /// The replied-to message when it is in the loaded page.
     let replyOriginal: MessageRecord?
+    #if UI_SNAPSHOTS
+    @State private var hovering = RenderCount.forceHover
+    #else
     @State private var hovering = false
+    #endif
     /// Hover controls (time, reply, and the reaction menu, an AppKit pop-up
     /// button) exist only once the pointer has visited. Hundreds of invisible
     /// copies would otherwise be redrawn on every frame of a resize or sidebar slide.
+    #if UI_SNAPSHOTS
+    @State private var hovered = RenderCount.forceHover
+    #else
     @State private var hovered = false
+    #endif
 
     private var shape: UnevenRoundedRectangle {
         let big: CGFloat = 18, small: CGFloat = 5
@@ -515,16 +610,20 @@ private struct MessageBubble: View {
     // fixed width, short messages still hug their content, and at least
     // 24 pt stays free on the far side.
     private var placedBubble: some View {
-        bubble.overlay(alignment: message.outgoing ? .leading : .trailing) { if hovered { sideDetails } }
+        bubble.overlay(alignment: message.outgoing ? .leading : .trailing) { sideDetails }
             .frame(maxWidth: maxWidth, alignment: message.outgoing ? .trailing : .leading)
             .padding(message.outgoing ? .leading : .trailing, 24)
             .frame(maxWidth: .infinity, alignment: message.outgoing ? .trailing : .leading)
     }
 
     // Time, transport and reaction controls sit beside the bubble without taking part in its layout.
+    // The container stays in place (and carries the alignment guide) whether or
+    // not the controls have been built.
     private var sideDetails: some View {
         HStack(spacing: 6) {
-            if message.outgoing { hoverDetail; replyButton } else { reactButton; replyButton; hoverDetail }
+            if hovered {
+                if message.outgoing { hoverDetail; replyButton } else { reactButton; replyButton; hoverDetail }
+            }
         }
         .fixedSize()
         .alignmentGuide(message.outgoing ? .leading : .trailing) { dimensions in

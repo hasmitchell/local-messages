@@ -64,11 +64,160 @@ enum SnapshotRunner {
                     try? JSONSerialization.data(withJSONObject: metrics, options: [.prettyPrinted, .sortedKeys]).write(to: directory.appendingPathComponent("idle.json"))
                     exit(0)
                 }
-                if let count = Int(value("--sidebar-toggle") ?? "") {
+                if arguments.contains("--slide-trace") {
+                    // Per display frame, with as few reads as possible: sidebar width,
+                    // the search field's window position, the split view's width.
+                    NSApp.activate(ignoringOtherApps: true)
+                    guard let window = NSApp.windows.first(where: { $0.isVisible && !($0 is NSPanel) }) else { exit(4) }
+                    window.makeKeyAndOrderFront(nil)
+                    try? await Task.sleep(for: .seconds(1))
+                    func split(_ view: NSView) -> NSSplitView? { (view as? NSSplitView) ?? view.subviews.lazy.compactMap(split).first }
+                    func searchField(_ view: NSView) -> NSSearchField? { (view as? NSSearchField) ?? view.subviews.lazy.compactMap(searchField).first }
+                    guard let splitView = window.contentView.flatMap(split), let field = splitView.arrangedSubviews.first.flatMap(searchField) else { exit(5) }
+                    let sidebarItem = (splitView.delegate as? NSSplitViewController)?.splitViewItems.first
+                    var lines: [String] = []
+                    for pass in ["close", "open"] {
+                        lines.append("--- \(pass)")
+                        let start = Date()
+                        ResponsivenessRunner.toggleSidebar()
+                        _ = await ResponsivenessRunner.frames {
+                            while Date().timeIntervalSince(start) < 0.6 {
+                                try? await Task.sleep(for: .milliseconds(8))
+                                let width = ResponsivenessRunner.sidebarWidth()
+                                let sx = Int(field.convert(field.bounds, to: nil).minX)
+                                let state = sidebarItem.map { "\($0.isCollapsed ? "c" : "o")\($0.collapseBehavior.rawValue)" } ?? "?"
+                                lines.append(String(format: "%4.0fms w%3d search-x%5d split-w%5d %@", Date().timeIntervalSince(start) * 1000, Int(width), sx, Int(splitView.frame.width), state))
+                            }
+                        }
+                        try? await Task.sleep(for: .milliseconds(400))
+                    }
+                    try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                    try? lines.joined(separator: "\n").write(to: directory.appendingPathComponent("slide-trace.txt"), atomically: true, encoding: .utf8)
+                    exit(0)
+                }
+                if arguments.contains("--toolbar-trace") {
+                    // On every display frame of a close then an open, records the
+                    // sidebar width and each toolbar item's position, to show which
+                    // items AppKit removes, re-adds or moves abruptly.
+                    NSApp.activate(ignoringOtherApps: true)
+                    guard let window = NSApp.windows.first(where: { $0.isVisible && !($0 is NSPanel) }) else { exit(4) }
+                    window.makeKeyAndOrderFront(nil)
+                    try? await Task.sleep(for: .seconds(1))
+                    var lines: [String] = []
+                    func split(_ view: NSView) -> NSSplitView? { (view as? NSSplitView) ?? view.subviews.lazy.compactMap(split).first }
+                    let splitView = window.contentView.flatMap(split)
+                    @MainActor func describe() -> String {
+                        let items = (window.toolbar?.items ?? []).map { item -> String in
+                            let id = item.itemIdentifier.rawValue.replacingOccurrences(of: "com.apple.SwiftUI.", with: "").prefix(22)
+                            guard let view = item.view, view.superview != nil else { return "\(id)[-]" }
+                            let frame = view.convert(view.bounds, to: nil)
+                            return "\(id)[\(Int(frame.minX))+\(Int(frame.width))\(view.isHiddenOrHasHiddenAncestor ? "h" : "")]"
+                        }
+                        func searchField(_ view: NSView) -> NSSearchField? { (view as? NSSearchField) ?? view.subviews.lazy.compactMap(searchField).first }
+                        var field = "no-sidebar-search"
+                        if let sidebar = splitView?.arrangedSubviews.first, let found = searchField(sidebar) {
+                            let frame = found.convert(found.bounds, to: nil)
+                            field = "search[\(Int(frame.minX))+\(Int(frame.width))\(found.isHiddenOrHasHiddenAncestor ? "h" : "")]"
+                        }
+                        let width = ResponsivenessRunner.sidebarWidth()
+                        let sidebarItem = (splitView?.delegate as? NSSplitViewController)?.splitViewItems.first
+                        let state = sidebarItem.map { "\($0.isCollapsed ? "collapsed" : "open")/b\($0.collapseBehavior.rawValue)" } ?? "?"
+                        return "sidebar \(Int(width)) \(state) \(field): " + items.joined(separator: " ")
+                    }
+                    for pass in ["close", "open"] {
+                        lines.append("--- \(pass)")
+                        let start = Date()
+                        ResponsivenessRunner.toggleSidebar()
+                        var last = ""
+                        while Date().timeIntervalSince(start) < 0.8 {
+                            let now = describe()
+                            if now != last { lines.append(String(format: "%4.0fms ", Date().timeIntervalSince(start) * 1000) + now); last = now }
+                            try? await Task.sleep(for: .milliseconds(8))
+                        }
+                    }
+                    try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                    try? lines.joined(separator: "\n").write(to: directory.appendingPathComponent("toolbar-trace.txt"), atomically: true, encoding: .utf8)
+                    exit(0)
+                }
+                if arguments.contains("--toolbar-shots") {
+                    try? await Task.sleep(for: .seconds(1))
+                    try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                    for name in ["open", "collapsed"] {
+                        if name == "collapsed" { ResponsivenessRunner.toggleSidebar(); try? await Task.sleep(for: .seconds(1)) }
+                        if let window = NSApp.windows.first(where: { $0.isVisible }), let rep = render(window), let data = rep.representation(using: .png, properties: [:]) {
+                            try? data.write(to: directory.appendingPathComponent("toolbar-\(name).png"))
+                        }
+                    }
+                    exit(0)
+                }
+                if let fraction = Double(value("--scroll-shot") ?? "") {
+                    // Scrolls up as a user would, then renders what is on screen.
+                    if arguments.contains("--force-hover"), let id = model.selectedID {
+                        RenderCount.forceHover = true
+                        model.select(id, force: true)
+                        while model.loadingMessages { try? await Task.sleep(for: .milliseconds(20)) }
+                    }
+                    try? await Task.sleep(for: .seconds(1))
+                    guard let scroll = ResponsivenessRunner.timelineScrollView(), let document = scroll.documentView else { exit(5) }
+                    let target = document.frame.height * fraction
+                    let startY = scroll.contentView.bounds.origin.y
+                    for step in 1...40 {
+                        let y = startY + (target - startY) * Double(step) / 40
+                        scroll.contentView.scroll(to: NSPoint(x: 0, y: y)); scroll.reflectScrolledClipView(scroll.contentView)
+                        try? await Task.sleep(for: .milliseconds(16))
+                    }
+                    try? await Task.sleep(for: .milliseconds(300))
+                    try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                    if let window = NSApp.windows.first(where: { $0.isVisible }), let rep = render(window), let data = rep.representation(using: .png, properties: [:]) {
+                        try? data.write(to: directory.appendingPathComponent("scrolled-0.png"))
+                    }
+                    try? JSONSerialization.data(withJSONObject: ["offset": scroll.contentView.bounds.origin.y], options: []).write(to: directory.appendingPathComponent("idle.json"))
+                    exit(0)
+                }
+                if let steps = Int(value("--resize-cost") ?? "") {
+                    // A sidebar slide, as window widths laid out one after another;
+                    // forced layout keeps this independent of the display.
                     if let id = value("--conversation") { model.select(id); while model.loadingMessages { try? await Task.sleep(for: .milliseconds(20)) } }
                     if arguments.contains("--no-conversation") { model.selectedID = nil }
                     try? await Task.sleep(for: .seconds(1))
-                    var stalls: [Double] = [], costs: [Double] = [], mainCosts: [Double] = [], widths: [String] = [], dropped: [Int] = [], frameCounts: [Int] = []
+                    guard let window = NSApp.windows.first(where: { $0.isVisible && !($0 is NSPanel) }) else { exit(4) }
+                    let start = window.frame
+                    // Settle once so any off-screen spacing is in place.
+                    window.contentView?.layoutSubtreeIfNeeded()
+                    try? await Task.sleep(for: .milliseconds(500))
+                    var costs: [Double] = [], worst: [Double] = [], spikes: [String] = []
+                    for round in 0..<4 {
+                        let cpu = ResponsivenessRunner.threadCPU()
+                        var roundWorst = 0.0
+                        for step in 0...steps {
+                            let progress = Double(step) / Double(steps)
+                            let width = start.width + (round % 2 == 0 ? progress : 1 - progress) * 308
+                            let stepStart = ResponsivenessRunner.threadCPU()
+                            window.setFrame(NSRect(x: start.minX, y: start.minY, width: width, height: start.height), display: false)
+                            window.contentView?.layoutSubtreeIfNeeded()
+                            await Task.yield()
+                            let stepCost = (ResponsivenessRunner.threadCPU() - stepStart) * 1000
+                            roundWorst = max(roundWorst, stepCost)
+                            if stepCost > 8 { spikes.append("r\(round) w\(Int(width)): \(Int(stepCost))ms") }
+                        }
+                        worst.append(roundWorst)
+                        costs.append((ResponsivenessRunner.threadCPU() - cpu) * 1000 / Double(steps + 1))
+                        try? await Task.sleep(for: .milliseconds(300))
+                    }
+                    try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                    let metrics: [String: Any] = ["layout_ms_per_frame": costs, "worst_frame_ms": worst, "spikes": spikes, "messages": model.messages.count]
+                    try? JSONSerialization.data(withJSONObject: metrics, options: [.prettyPrinted, .sortedKeys]).write(to: directory.appendingPathComponent("idle.json"))
+                    exit(0)
+                }
+                if let count = Int(value("--sidebar-toggle") ?? "") {
+                    if let id = value("--conversation") { model.select(id); while model.loadingMessages { try? await Task.sleep(for: .milliseconds(20)) } }
+                    if arguments.contains("--no-conversation") { model.selectedID = nil }
+                    if arguments.contains("--activate") {
+                        NSApp.activate(ignoringOtherApps: true)
+                        NSApp.windows.first(where: { $0.isVisible && !($0 is NSPanel) })?.makeKeyAndOrderFront(nil)
+                    }
+                    try? await Task.sleep(for: .seconds(1))
+                    var stalls: [Double] = [], costs: [Double] = [], mainCosts: [Double] = [], widths: [String] = [], dropped: [Int] = [], frameCounts: [Int] = [], slow: [String] = [], snaps: [String] = []
                     let renders = await RenderCount.during {
                         for _ in 0..<count {
                             try? await Task.sleep(for: .milliseconds(400))
@@ -79,6 +228,9 @@ enum SnapshotRunner {
                                 try? await Task.sleep(for: .milliseconds(700))
                             }
                             stalls.append(frames.worstMS); dropped.append(frames.over12ms); frameCounts.append(frames.count)
+                            slow.append(ResponsivenessRunner.lastSlowFrames.joined(separator: ", "))
+                            let snap = ResponsivenessRunner.lastSnap
+                            snaps.append("\(Int(snap.points))pt (\(Int(snap.share * 100))%) at \(Int(snap.at))")
                             costs.append((ResponsivenessRunner.cpuNow() - start) * 1000)
                             mainCosts.append((ResponsivenessRunner.threadCPU() - mainStart) * 1000)
                             widths.append("\(Int(before))→\(Int(ResponsivenessRunner.sidebarWidth()))")
@@ -86,7 +238,7 @@ enum SnapshotRunner {
                     }
                     try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
                     let metrics: [String: Any] = ["worst_frame_ms_median": stalls.sorted()[stalls.count / 2], "worst_frame_ms_max": stalls.max() ?? 0, "long_frames": dropped, "frames": frameCounts,
-                                                  "toggle_cpu_ms_median": costs.sorted()[costs.count / 2], "toggle_main_cpu_ms_median": mainCosts.sorted()[mainCosts.count / 2], "redraws_per_toggle": renders.mapValues { $0 / count }, "messages": model.messages.count, "sidebar_widths": widths]
+                                                  "toggle_cpu_ms_median": costs.sorted()[costs.count / 2], "toggle_main_cpu_ms_median": mainCosts.sorted()[mainCosts.count / 2], "redraws_per_toggle": renders.mapValues { $0 / count }, "messages": model.messages.count, "sidebar_widths": widths, "slow_frames": slow, "largest_step": snaps]
                     try? JSONSerialization.data(withJSONObject: metrics, options: [.prettyPrinted, .sortedKeys]).write(to: directory.appendingPathComponent("idle.json"))
                     exit(0)
                 }

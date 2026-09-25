@@ -7,6 +7,15 @@ import SwiftUI
 /// changes (typing, sync status) leave them alone.
 @MainActor enum RenderCount {
     static var counts: [String: Int] = [:]
+    /// Renders every bubble as if hovered, to check the controls' placement.
+    static var forceHover = false
+    /// Experiment switches from the command line: `--name value` or `--name`.
+    static func option(_ name: String) -> String? {
+        let arguments = CommandLine.arguments
+        guard let index = arguments.firstIndex(of: "--" + name) else { return nil }
+        return arguments.indices.contains(index + 1) && !arguments[index + 1].hasPrefix("--") ? arguments[index + 1] : ""
+    }
+
     static func bump(_ view: String) { counts[view, default: 0] += 1 }
     static func during(_ work: () async -> Void) async -> [String: Int] {
         let before = counts
@@ -146,10 +155,18 @@ import SwiftUI
         return Double(info.user_time.seconds + info.system_time.seconds) + Double(info.user_time.microseconds + info.system_time.microseconds) / 1_000_000
     }
     /// Frame timestamps from the window's display link while `work` runs.
-    final class FrameRecorder: NSObject {
+    @MainActor final class FrameRecorder: NSObject {
         var stamps: [CFTimeInterval] = []
-        @objc func tick(_ link: CADisplayLink) { stamps.append(link.timestamp) }
+        var widths: [CGFloat] = []
+        @objc func tick(_ link: CADisplayLink) {
+            stamps.append(link.timestamp)
+            widths.append(ResponsivenessRunner.sidebarWidth())
+        }
     }
+    static var lastSlowFrames: [String] = []
+    /// The largest change in sidebar width between two consecutive frames, and
+    /// how much of the full slide happened in that one frame: a snap.
+    static var lastSnap: (points: CGFloat, share: Double, at: CGFloat) = (0, 0, 0)
     static func frames(_ work: () async -> Void) async -> (count: Int, worstMS: Double, over12ms: Int) {
         let recorder = FrameRecorder()
         guard let view = NSApp.windows.first(where: \.isVisible)?.contentView else { await work(); return (0, 0, 0) }
@@ -158,6 +175,11 @@ import SwiftUI
         await work()
         link.invalidate()
         let gaps = zip(recorder.stamps, recorder.stamps.dropFirst()).map { ($1 - $0) * 1000 }
+        let widths = recorder.widths, total = abs((widths.last ?? 0) - (widths.first ?? 0))
+        var snap: (points: CGFloat, share: Double, at: CGFloat) = (0, 0, 0)
+        for (a, b) in zip(widths, widths.dropFirst()) where abs(b - a) > snap.points { snap = (abs(b - a), total > 0 ? abs(b - a) / total : 0, a) }
+        lastSnap = snap
+        lastSlowFrames = gaps.enumerated().filter { $0.element > 12 }.map { "sidebar \(Int(recorder.widths[$0.offset]))→\(Int(recorder.widths[$0.offset + 1])): \(Int($0.element))ms" }
         return (recorder.stamps.count, gaps.max() ?? 0, gaps.filter { $0 > 12 }.count)
     }
     /// Slides the sidebar as its toolbar button does, whether or not this window is key.
