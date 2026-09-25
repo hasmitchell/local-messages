@@ -8,7 +8,11 @@ struct ComposerTextView: NSViewRepresentable {
     var isEditable: Bool
     var spellCheck: Bool
     var autocorrect: Bool
+    var emojiShortcuts: Bool
+    var contextID: String
+    var actions: ComposerEditorActions
     var placeholder: String
+    var onSubmit: () -> Void
     var onHeightChange: (CGFloat) -> Void
     var onFocusChange: (Bool) -> Void
     var onAttachFiles: ([URL]) -> Void
@@ -43,6 +47,7 @@ struct ComposerTextView: NSViewRepresentable {
         scroll.borderType = .noBorder
         scroll.verticalScrollElasticity = .none
         context.coordinator.textView = textView
+        actions.textView = textView
         NotificationCenter.default.addObserver(context.coordinator, selector: #selector(Coordinator.frameChanged), name: NSView.frameDidChangeNotification, object: textView)
         apply(to: textView, coordinator: context.coordinator)
         return scroll
@@ -55,26 +60,37 @@ struct ComposerTextView: NSViewRepresentable {
     }
 
     private func apply(to textView: ComposerNSTextView, coordinator: Coordinator) {
-        if textView.string != text {
+        actions.textView = textView
+        let contextChanged = coordinator.contextID != contextID
+        if contextChanged {
+            coordinator.contextID = contextID
+        }
+        if contextChanged || textView.string != text {
+            // Programmatic draft changes (including a successful send) must
+            // not retain undo operations targeting the previous text.
+            textView.undoManager?.removeAllActions()
             let selection = textView.selectedRange()
             textView.string = text
-            let location = min(selection.location, (text as NSString).length)
+            let location = contextChanged ? (text as NSString).length : min(selection.location, (text as NSString).length)
             textView.setSelectedRange(NSRange(location: location, length: 0))
             textView.needsDisplay = true
             coordinator.reportHeight()
         }
+        textView.emojiShortcutsEnabled = emojiShortcuts
         textView.isEditable = isEditable
         textView.isContinuousSpellCheckingEnabled = spellCheck
         textView.isAutomaticSpellingCorrectionEnabled = autocorrect
         textView.placeholder = placeholder
+        textView.submit = onSubmit
         textView.attachFiles = onAttachFiles
         textView.attachData = onAttachData
     }
 
     func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
 
-    final class Coordinator: NSObject, NSTextViewDelegate {
+    @MainActor final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: ComposerTextView
+        var contextID: String?
         weak var textView: ComposerNSTextView?
         private var lastHeight: CGFloat = 0
         init(parent: ComposerTextView) { self.parent = parent }
@@ -103,6 +119,45 @@ struct ComposerTextView: NSViewRepresentable {
 
 final class ComposerNSTextView: NSTextView {
     var placeholder = ""
+    var emojiShortcutsEnabled = true
+    private let editingUndoManager = UndoManager()
+    override var undoManager: UndoManager? { editingUndoManager }
+
+    override func insertText(_ insertString: Any, replacementRange: NSRange) {
+        let composing = hasMarkedText()
+        super.insertText(insertString, replacementRange: replacementRange)
+        guard isEditable, emojiShortcutsEnabled, !composing, !hasMarkedText(),
+              let inserted = insertString as? String, inserted.utf16.count == 1,
+              selectedRange().length == 0,
+              let replacement = EmojiShortcuts.replacement(in: string, caret: selectedRange().location) else { return }
+        // Give Undo a replacement to undo, rather than rewriting the full draft.
+        breakUndoCoalescing()
+        // Typing the closing character and replacing the shortcut happen in
+        // one key event. End its automatic group so Undo restores the shortcut.
+        if editingUndoManager.groupingLevel == 1 {
+            editingUndoManager.endUndoGrouping()
+            editingUndoManager.beginUndoGrouping()
+        }
+        super.insertText(replacement.emoji, replacementRange: replacement.range)
+        breakUndoCoalescing()
+    }
+    /// Return sends; Shift-Return (or Option-Return) adds a new line.
+    var submit: (() -> Void)?
+    private var keyModifiers: NSEvent.ModifierFlags = []
+    override func keyDown(with event: NSEvent) {
+        keyModifiers = event.modifierFlags
+        defer { keyModifiers = [] }
+        super.keyDown(with: event)
+    }
+    override func doCommand(by selector: Selector) {
+        let newline = [#selector(insertNewline(_:)), #selector(insertLineBreak(_:)), #selector(insertParagraphSeparator(_:)), #selector(insertNewlineIgnoringFieldEditor(_:))]
+        guard let submit, newline.contains(selector), !hasMarkedText() else { return super.doCommand(by: selector) }
+        let modifiers = keyModifiers.intersection([.shift, .option])
+        // A plain newline character, never U+2028, whichever binding produced it.
+        if !modifiers.isEmpty { insertNewlineIgnoringFieldEditor(nil) }
+        else if selector == #selector(insertNewline(_:)) { submit() }
+        else { super.doCommand(by: selector) }
+    }
     var attachFiles: (([URL]) -> Void)?
     var attachData: ((Data, String) -> Void)?
 
@@ -164,5 +219,14 @@ enum PastedImage {
     static func png(from image: NSImage) -> Data? {
         guard let tiff = image.tiffRepresentation, let bitmap = NSBitmapImageRep(data: tiff) else { return nil }
         return bitmap.representation(using: .png, properties: [:])
+    }
+}
+
+@MainActor final class ComposerEditorActions: ObservableObject {
+    weak var textView: ComposerNSTextView?
+    func showEmojiPicker() {
+        guard let textView, textView.isEditable, let window = textView.window else { return }
+        window.makeFirstResponder(textView)
+        NSApp.orderFrontCharacterPalette(nil)
     }
 }

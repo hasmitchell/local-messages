@@ -3,7 +3,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct ConversationDetail: View {
-    @EnvironmentObject private var model: ArchiveModel
+    @Environment(ArchiveModel.self) private var model
     let conversation: ConversationRecord
 
     private var subtitle: String {
@@ -25,10 +25,11 @@ struct ConversationDetail: View {
 
     @State private var dropTargeted = false
     var body: some View {
+        @Bindable var bindable = model
         VStack(spacing: 0) {
             if model.loadingMessages {
                 ProgressView().controlSize(.small).frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if model.messages.isEmpty && model.outbox.isEmpty {
+            } else if model.messages.isEmpty && model.displayedOutbox.isEmpty {
                 ContentUnavailableView("No Saved Messages", systemImage: "tray", description: Text("This conversation has no messages in the saved date range."))
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else { MessageTimeline(conversation: conversation) }
@@ -79,13 +80,13 @@ struct ConversationDetail: View {
         .toolbar {
             ToolbarItem(placement: .navigation) {
                 AvatarButton(conversation: conversation)
-                    .popover(isPresented: $model.showingDetails, arrowEdge: .bottom) {
+                    .popover(isPresented: $bindable.showingDetails, arrowEdge: .bottom) {
                         ConversationInfo(conversation: conversation).frame(width: 500, height: 660)
                     }
             }
         }
         // The find field lives in the toolbar; on macOS 26 it collapses to its icon until used.
-        .searchable(text: $model.threadQuery, isPresented: $model.showingThreadSearch, placement: .toolbar, prompt: "Find in Conversation")
+        .searchable(text: $bindable.threadQuery, isPresented: $bindable.showingThreadSearch, placement: .toolbar, prompt: "Find in Conversation")
         .onChange(of: model.threadQuery) { model.scheduleThreadSearch() }
         .onChange(of: model.showingThreadSearch) { _, showing in if !showing { model.threadSearchDismissed() } }
     }
@@ -94,7 +95,7 @@ struct ConversationDetail: View {
 // The avatar keeps the toolbar's own button chrome and adds hover feedback,
 // so it reads as clickable like its neighbours.
 private struct AvatarButton: View {
-    @EnvironmentObject private var model: ArchiveModel
+    @Environment(ArchiveModel.self) private var model
     let conversation: ConversationRecord
     @State private var hovering = false
     var body: some View {
@@ -113,10 +114,11 @@ private struct AvatarButton: View {
 
 // MARK: - Timeline
 
-private struct TimelineEntry: Identifiable {
-    enum Kind {
+private struct TimelineEntry: Identifiable, Equatable {
+    enum Kind: Equatable {
         case separator(String)
         case message(MessageRecord, first: Bool, last: Bool, showsSender: Bool, showsStatus: Bool)
+        case pending(OutboxRecord, first: Bool)
     }
     let id: String
     let kind: Kind
@@ -124,56 +126,67 @@ private struct TimelineEntry: Identifiable {
 
 // Consecutive messages from one sender within five minutes form a group with
 // tighter spacing; a gap of more than an hour or a new day gets a time label.
-private func timelineEntries(_ messages: [MessageRecord], group: Bool, calendar: Calendar = .current) -> [TimelineEntry] {
+private func timelineEntries(_ messages: [MessageRecord], outbox: [OutboxRecord], submissions: [String: String], group: Bool, calendar: Calendar = .current) -> [TimelineEntry] {
     func continues(_ earlier: MessageRecord, _ later: MessageRecord) -> Bool {
         earlier.outgoing == later.outgoing && earlier.sender == later.sender
             && later.date.timeIntervalSince(earlier.date) < 300 && calendar.isDate(earlier.date, inSameDayAs: later.date)
     }
-    let lastOutgoing = messages.last(where: \.outgoing)?.id
+    let lastOutgoing = outbox.isEmpty ? messages.last(where: \.outgoing)?.id : nil
     var entries: [TimelineEntry] = []
     entries.reserveCapacity(messages.count + 8)
     for (index, message) in messages.enumerated() {
         let previous = index > 0 ? messages[index - 1] : nil
         let next = index + 1 < messages.count ? messages[index + 1] : nil
+        let rowID = submissions[message.id].map { "outbox-" + $0 } ?? message.id
         let separator = previous.map { message.date.timeIntervalSince($0.date) > 3600 || !calendar.isDate($0.date, inSameDayAs: message.date) } ?? true
-        if separator { entries.append(TimelineEntry(id: "separator-" + message.id, kind: .separator(RelativeDate.separator(message.date)))) }
+        if separator { entries.append(TimelineEntry(id: "separator-" + rowID, kind: .separator(RelativeDate.separator(message.date)))) }
         let first = separator || previous.map { !continues($0, message) } ?? true
-        let last = next.map { !continues(message, $0) } ?? true
+        let continuesToPending = message.outgoing && outbox.first.map { $0.created >= message.timestamp && $0.created - message.timestamp < 300_000_000 } ?? false
+        let last = next.map { !continues(message, $0) } ?? !continuesToPending
         let showsStatus = message.outgoing && (message.id == lastOutgoing || message.status.contains("FAILED") || message.deliveryLabel == "Sending")
-        entries.append(TimelineEntry(id: message.id, kind: .message(message, first: first, last: last, showsSender: group && !message.outgoing && first, showsStatus: showsStatus)))
+        entries.append(TimelineEntry(id: rowID, kind: .message(message, first: first, last: last, showsSender: group && !message.outgoing && first, showsStatus: showsStatus)))
+    }
+    for (index, pending) in outbox.enumerated() {
+        let previousTime = index > 0 ? outbox[index - 1].created : messages.last?.timestamp
+        let date = Date(timeIntervalSince1970: Double(pending.created) / 1_000_000)
+        if pending.created > 0, previousTime.map({ pending.created - $0 > 3_600_000_000 || !calendar.isDate(Date(timeIntervalSince1970: Double($0) / 1_000_000), inSameDayAs: date) }) ?? true {
+            entries.append(TimelineEntry(id: "separator-outbox-" + pending.id, kind: .separator(RelativeDate.separator(date))))
+        }
+        let sameSender = index > 0 || messages.last?.outgoing == true
+        let first = !sameSender || previousTime.map { pending.created < $0 || pending.created - $0 >= 300_000_000 } ?? true
+        entries.append(TimelineEntry(id: "outbox-" + pending.id, kind: .pending(pending, first: first)))
     }
     return entries
 }
 
 private struct MessageTimeline: View {
-    @EnvironmentObject private var model: ArchiveModel
+    @Environment(ArchiveModel.self) private var model
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let conversation: ConversationRecord
 
     var body: some View {
+        #if UI_SNAPSHOTS
+        let _ = RenderCount.bump("timeline")
+        #endif
         GeometryReader { geometry in
         ScrollViewReader { reader in
             ScrollView {
-                let entries = timelineEntries(model.messages, group: conversation.isGroup)
+                let pending = model.displayedOutbox
+                let entries = timelineEntries(model.messages, outbox: pending.filter { !$0.isReaction }, submissions: model.messageSubmissions, group: conversation.isGroup)
+                let context = BubbleContext(model: model, conversation: conversation)
                 let contentWidth = min(1100, geometry.size.width) - 36
                 let bubbleWidth = min(540, max(240, contentWidth * 0.72))
-                // Pages are bounded to 100 messages. Eager layout gives stable
-                // geometry for scroll-to-result and latest-message positioning.
-                VStack(spacing: 0) {
+                // Only visible rows are built; image sizes are known ahead of
+                // layout (ImageSizeCache), so row heights do not jump.
+                LazyVStack(spacing: 0) {
                     if model.hasEarlier {
                         LoadMoreButton(title: "Show Earlier Messages") { model.loadMore(earlier: true) }.disabled(model.paging).padding(.bottom, 6)
                     }
-                    ForEach(entries) { entry in
-                        switch entry.kind {
-                        case .separator(let label):
-                            TimelineSeparator(label: label)
-                        case .message(let message, let first, let last, let showsSender, let showsStatus):
-                            MessageBubble(message: message, first: first, last: last, showsSender: showsSender, showsStatus: showsStatus,
-                                          highlighted: model.highlightedID == message.id, maxWidth: bubbleWidth, spare: max(24, contentWidth - bubbleWidth))
-                                .id(message.id)
-                        }
-                    }
-                    ForEach(model.outbox.filter { !$0.isReaction }) { pending in OutboxBubble(message: pending, spare: contentWidth - bubbleWidth) }
-                    ForEach(model.outbox.filter(\.isReaction)) { pending in
+                    TimelineRows(model: model, entries: entries, bubbles: context.states(model.messages, highlighted: model.highlightedID),
+                                 directory: context.directory, canReply: context.canReply, bubbleWidth: bubbleWidth, contentWidth: contentWidth,
+                                 newSend: "outbox-" + model.sendPulse.uuidString.lowercased())
+                        .equatable()
+                    ForEach(pending.filter(\.isReaction)) { pending in
                         Text("Reaction \(pending.command?.emoji ?? "") · \(pending.label)").font(.caption)
                             .foregroundStyle(pending.state == "unknown" || pending.state == "failed" ? .orange : .secondary).padding(.top, 8)
                     }
@@ -182,24 +195,17 @@ private struct MessageTimeline: View {
                     if model.hasLater {
                         LoadMoreButton(title: "Show Later Messages") { model.loadMore(earlier: false) }.disabled(model.paging).padding(.top, 14)
                     }
-                    Color.clear.frame(height: 1).id("timeline-bottom").background(GeometryReader { proxy in
-                        Color.clear.preference(key: TimelineBottomPreference.self, value: proxy.frame(in: .named("timelineViewport")).maxY)
-                    })
+                    Color.clear.frame(height: 1).id("timeline-bottom").modifier(BottomEdgeProbe())
                 }.padding(.horizontal, 18).padding(.top, 12).padding(.bottom, 10).frame(maxWidth: 1100)
                     .frame(maxWidth: .infinity)
             }
             .coordinateSpace(name: "timelineViewport")
+            .background(TimelineScrollIntent(onScroll: model.userScrolledTimeline))
             .modifier(LegibleToolbarEdge())
-            .modifier(ScrollEdgeObserver(edge: .bottom) { model.timelineAtBottom = $0 })
+            .modifier(ScrollEdgeObserver(edge: .bottom) { if model.timelineAtBottom != $0 { model.timelineAtBottom = $0 } })
             .overlay(alignment: .bottomTrailing) {
-                if model.hasLater || !model.timelineAtBottom {
-                    FloatingJumpButton(symbol: "arrow.down", title: "Jump to latest messages") {
-                        if model.hasLater { model.showLatest() }
-                        else {
-                            model.highlightedID = nil
-                            withAnimation(.easeOut(duration: 0.2)) { reader.scrollTo("timeline-bottom", anchor: .bottom) }
-                        }
-                    }
+                if !model.followingOwnSend && (model.hasLater || !model.timelineAtBottom) {
+                    FloatingJumpButton(symbol: "arrow.down", title: "Jump to latest messages", action: model.jumpToLatest)
                     .padding(14)
                     .accessibilityIdentifier("messagesToBottom")
                     .transition(.scale(scale: 0.5, anchor: .bottomTrailing).combined(with: .opacity))
@@ -208,19 +214,131 @@ private struct MessageTimeline: View {
             .animation(Motion.quick, value: model.timelineAtBottom)
             .animation(Motion.quick, value: model.hasLater)
             .onPreferenceChange(TimelineBottomPreference.self) { bottom in
-                if #unavailable(macOS 15) { model.timelineAtBottom = bottom >= 0 && bottom <= geometry.size.height + 60 }
+                if #unavailable(macOS 15) {
+                    let atBottom = bottom >= 0 && bottom <= geometry.size.height + 60
+                    if model.timelineAtBottom != atBottom { model.timelineAtBottom = atBottom }
+                }
             }
             .onChange(of: model.scrollRequest) { _, request in
                 guard let request else { return }
                 Task { @MainActor in
-                    await Task.yield()
-                    reader.scrollTo(request.atBottom ? "timeline-bottom" : request.messageID, anchor: request.atBottom ? .bottom : .center)
+                    if request.animated { try? await Task.sleep(for: .milliseconds(16)) }
+                    else { await Task.yield() }
+                    guard model.scrollRequest == request else { return }
+                    let manual = model.manualScrolls
+                    withAnimation(request.animated && !reduceMotion ? Motion.send : nil) {
+                        reader.scrollTo(request.atBottom ? "timeline-bottom" : request.messageID, anchor: request.atBottom ? .bottom : .center)
+                    }
+                    // Rows are built lazily, so the first scroll can land on
+                    // estimated heights. Settle once they are real, unless the
+                    // user has taken over; at the target this changes nothing.
+                    for delay in request.animated ? [500] : [60, 250] {
+                        try? await Task.sleep(for: .milliseconds(delay))
+                        guard model.scrollRequest == request, model.manualScrolls == manual else { return }
+                        reader.scrollTo(request.atBottom ? "timeline-bottom" : request.messageID, anchor: request.atBottom ? .bottom : .center)
+                    }
                 }
             }
             .onAppear {
                 if let request = model.scrollRequest { reader.scrollTo(request.atBottom ? "timeline-bottom" : request.messageID, anchor: request.atBottom ? .bottom : .center) }
             }
         }
+        }
+    }
+}
+
+// The loaded messages. Most model changes (sync status, typing, search, drafts)
+// leave these inputs equal, so SwiftUI skips the whole list after one comparison
+// instead of diffing every row.
+private struct TimelineRows: View, Equatable {
+    let model: ArchiveModel
+    let entries: [TimelineEntry]
+    let bubbles: [String: BubbleState]
+    let directory: URL?
+    let canReply: Bool
+    let bubbleWidth: CGFloat
+    let contentWidth: CGFloat
+    let newSend: String
+    nonisolated static func == (a: Self, b: Self) -> Bool {
+        a.model === b.model && a.entries == b.entries && a.bubbles == b.bubbles && a.directory == b.directory && a.canReply == b.canReply
+            && a.bubbleWidth == b.bubbleWidth && a.contentWidth == b.contentWidth && a.newSend == b.newSend
+    }
+    var body: some View {
+        #if UI_SNAPSHOTS
+        let _ = RenderCount.bump("rows")
+        #endif
+        ForEach(entries) { entry in
+            VStack(spacing: 0) {
+                switch entry.kind {
+                case .separator(let label):
+                    TimelineSeparator(label: label)
+                case .message(let message, let first, let last, let showsSender, let showsStatus):
+                    let state = bubbles[message.id] ?? BubbleState()
+                    MessageBubble(model: model, message: message, first: first, last: last, showsSender: showsSender, showsStatus: showsStatus,
+                                  highlighted: state.highlighted, maxWidth: bubbleWidth, spare: max(24, contentWidth - bubbleWidth),
+                                  directory: directory, canReply: canReply, reactable: state.reactable,
+                                  ownReaction: state.ownReaction, replyOriginal: state.original)
+                        .id(message.id)
+                case .pending(let message, let first):
+                    OutboxBubble(message: message, spare: contentWidth - bubbleWidth, first: first)
+                }
+            }
+            .modifier(SendBubbleEntrance(isNewSend: entry.id == newSend))
+            .transition(.identity)
+        }
+    }
+}
+
+private struct SendBubbleEntrance: ViewModifier {
+    let isNewSend: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var arrived = false
+    private var entering: Bool { isNewSend && !arrived }
+    func body(content: Content) -> some View {
+        content
+            .opacity(entering ? 0 : 1)
+            .offset(y: entering && !reduceMotion ? 14 : 0)
+            .scaleEffect(entering && !reduceMotion ? 0.97 : 1, anchor: .bottomTrailing)
+            .task {
+                guard isNewSend else { return }
+                await Task.yield()
+                withAnimation(Motion.send) { arrived = true }
+            }
+    }
+}
+
+// Wheel/trackpad input cancels send-following; programmatic scroll animation
+// does not. Restrict the monitor to this timeline, including on macOS 14.
+private struct TimelineScrollIntent: NSViewRepresentable {
+    var onScroll: () -> Void
+    func makeNSView(context: Context) -> Probe { let view = Probe(); view.onScroll = onScroll; view.install(); return view }
+    func updateNSView(_ view: Probe, context: Context) { view.onScroll = onScroll }
+    static func dismantleNSView(_ view: Probe, coordinator: ()) { view.uninstall() }
+    final class Probe: NSView {
+        var onScroll: (() -> Void)?
+        var monitor: Any?
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+        func install() {
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+                if let self, event.window === self.window, self.bounds.contains(self.convert(event.locationInWindow, from: nil)), event.scrollingDeltaY != 0 {
+                    self.onScroll?()
+                }
+                return event
+            }
+        }
+        func uninstall() { if let monitor { NSEvent.removeMonitor(monitor) }; monitor = nil }
+    }
+}
+
+// macOS 14 has no scroll-geometry callback, so it measures the bottom marker.
+// Later systems use ScrollEdgeObserver; there, a geometry preference would only
+// add work to every layout of the timeline.
+private struct BottomEdgeProbe: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(macOS 15, *) { content } else {
+            content.background(GeometryReader { proxy in
+                Color.clear.preference(key: TimelineBottomPreference.self, value: proxy.frame(in: .named("timelineViewport")).maxY)
+            })
         }
     }
 }
@@ -277,8 +395,44 @@ private struct LoadMoreButton: View {
 
 private let quickReactions = ["👍", "❤️", "😂", "😮", "😢", "👎"]
 
+// What a bubble shows that depends on the rest of the model, worked out once per
+// timeline update. Bubbles hold the model only to act on it, never observe it:
+// otherwise every change anywhere re-renders every loaded message.
+@MainActor private struct BubbleContext {
+    let directory: URL?
+    let canReply: Bool
+    private let model: ArchiveModel
+    private let own: Set<String>
+    private let byID: [String: MessageRecord]
+    init(model: ArchiveModel, conversation: ConversationRecord) {
+        self.model = model
+        directory = model.directory
+        canReply = model.canSync && !model.draftSubmitted
+        own = conversation.ownParticipantIDs
+        byID = model.messages.contains { $0.replyTo != nil } ? Dictionary(model.messages.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first }) : [:]
+    }
+    /// Per-message values; defaults are left out so the map stays small.
+    func states(_ messages: [MessageRecord], highlighted: String?) -> [String: BubbleState] {
+        var states: [String: BubbleState] = [:]
+        for message in messages {
+            let state = BubbleState(highlighted: message.id == highlighted,
+                                    reactable: !message.outgoing && model.canReact(message),
+                                    ownReaction: message.reactions.isEmpty ? nil : message.reactions.first { !own.isDisjoint(with: $0.participants ?? []) }?.emoji,
+                                    original: message.replyTo.flatMap { byID[$0] })
+            if state != BubbleState() { states[message.id] = state }
+        }
+        return states
+    }
+}
+private struct BubbleState: Equatable {
+    var highlighted = false
+    var reactable = false
+    var ownReaction: String?
+    var original: MessageRecord?
+}
+
 private struct MessageBubble: View {
-    @EnvironmentObject private var model: ArchiveModel
+    let model: ArchiveModel
     let message: MessageRecord
     let first: Bool
     let last: Bool
@@ -288,7 +442,15 @@ private struct MessageBubble: View {
     let maxWidth: CGFloat
     /// Space kept free beside the bubble; limiting the proposal this way lets the bubble hug its text.
     let spare: CGFloat
+    let directory: URL?
+    let canReply: Bool
+    let reactable: Bool
+    let ownReaction: String?
+    /// The replied-to message when it is in the loaded page.
+    let replyOriginal: MessageRecord?
     @State private var hovering = false
+    /// The reaction menu is an AppKit pop-up button; build it only once the pointer has visited.
+    @State private var hovered = false
 
     private var shape: UnevenRoundedRectangle {
         let big: CGFloat = 18, small: CGFloat = 5
@@ -305,7 +467,7 @@ private struct MessageBubble: View {
         if message.outgoing, !showsStatus, let label = message.deliveryLabel { parts.append(label) }
         return parts.joined(separator: " · ")
     }
-    private var localURLs: [URL] { model.directory.map { directory in message.attachments.compactMap { $0.localURL(in: directory) } } ?? [] }
+    private var localURLs: [URL] { directory.map { directory in message.attachments.compactMap { $0.localURL(in: directory) } } ?? [] }
     private var imageOnly: Bool {
         message.body.isEmpty && message.replyTo == nil && !message.attachments.isEmpty
             && message.attachments.allSatisfy(\.isImage) && localURLs.count == message.attachments.count
@@ -324,7 +486,7 @@ private struct MessageBubble: View {
                 if !message.outgoing { Spacer(minLength: spare) }
             }
             if showsStatus, !statusLine.isEmpty {
-                Text(statusLine).font(.caption2).foregroundStyle(message.status.contains("FAILED") ? .red : .secondary).padding(.horizontal, 6)
+                Text(statusLine).font(.caption2).foregroundStyle(message.status.contains("FAILED") ? .red : .secondary).frame(minHeight: 14).padding(.horizontal, 6)
             }
         }
         .padding(.top, first ? 8 : 2)
@@ -332,10 +494,7 @@ private struct MessageBubble: View {
         // The whole row, including the empty space beside the bubble, keeps the
         // hover controls visible while the pointer travels to them.
         .contentShape(Rectangle())
-        .onHover { hovering = $0 }
-        .transition(.asymmetric(
-            insertion: .move(edge: .bottom).combined(with: .opacity).combined(with: .scale(scale: 0.92, anchor: message.outgoing ? .bottomTrailing : .bottomLeading)),
-            removal: .opacity))
+        .onHover { hovering = $0; if $0 { hovered = true } }
     }
 
     // Time, transport and reaction controls sit beside the bubble without taking part in its layout.
@@ -354,21 +513,28 @@ private struct MessageBubble: View {
             .accessibilityHidden(!hovering)
     }
     private var reactButton: some View {
-        Menu { reactionItems } label: {
-            Image(systemName: "face.smiling").font(.system(size: 15)).foregroundStyle(.secondary)
+        // The menu is an AppKit pop-up button; build it only once the pointer has
+        // visited. A fixed slot keeps the controls beside it from moving.
+        ZStack {
+            if hovered {
+                Menu { reactionItems } label: {
+                    Image(systemName: "face.smiling").font(.system(size: 15)).foregroundStyle(.secondary)
+                }
+                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+                .opacity(hovering && reactable ? 1 : 0)
+                .scaleEffect(hovering ? 1 : 0.7)
+                .animation(Motion.quick, value: hovering)
+                .accessibilityLabel("React to message")
+            }
         }
-        .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
-        .opacity(hovering && model.canReact(message) ? 1 : 0)
-        .scaleEffect(hovering ? 1 : 0.7)
-        .animation(Motion.quick, value: hovering)
-        .accessibilityLabel("React to message")
+        .frame(width: 24, height: 20)
     }
     private var replyButton: some View {
         Button { model.setReplyTarget(message) } label: {
             Image(systemName: "arrowshape.turn.up.left").font(.system(size: 13, weight: .medium)).foregroundStyle(.secondary).frame(width: 20, height: 20)
         }
         .buttonStyle(.bouncy)
-        .opacity(hovering && model.canSync && model.draft.submissionID == nil ? 1 : 0)
+        .opacity(hovering && canReply ? 1 : 0)
         .scaleEffect(hovering ? 1 : 0.7)
         .animation(Motion.quick, value: hovering)
         .help("Reply")
@@ -376,7 +542,7 @@ private struct MessageBubble: View {
     }
     @ViewBuilder private var reactionItems: some View {
         ForEach(quickReactions, id: \.self) { emoji in Button(emoji) { model.react(message, emoji: emoji) } }
-        if model.ownReaction(message) != nil { Divider(); Button("Remove My Reaction") { model.react(message, emoji: "") } }
+        if ownReaction != nil { Divider(); Button("Remove My Reaction") { model.react(message, emoji: "") } }
     }
 
     private var bubble: some View {
@@ -397,15 +563,15 @@ private struct MessageBubble: View {
         }
         .animation(Motion.bouncy, value: message.reactions)
         .contextMenu {
-            if model.canSync { Button("Reply") { model.setReplyTarget(message) }.disabled(model.draft.submissionID != nil) }
-            if !message.outgoing { Menu("React") { reactionItems }.disabled(!model.canReact(message)) }
+            if model.canSync { Button("Reply") { model.setReplyTarget(message) }.disabled(!canReply) }
+            if !message.outgoing { Menu("React") { reactionItems }.disabled(!reactable) }
             if !message.body.isEmpty {
                 Button("Copy Text") {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(message.body, forType: .string)
                 }
             }
-            if let reply = message.replyTo, model.messages.contains(where: { $0.id == reply }) {
+            if replyOriginal != nil {
                 Button("Show Original Message") { model.showReply(message) }
             }
         }
@@ -414,8 +580,8 @@ private struct MessageBubble: View {
     private var content: some View {
         VStack(alignment: .leading, spacing: 6) {
 
-            if let reply = message.replyTo { ReplyQuote(message: message, replyID: reply) }
-            ForEach(message.attachments) { attachment in AttachmentView(attachment: attachment, maxWidth: maxWidth - (imageOnly ? 0 : 24), outgoing: message.outgoing) }
+            if let reply = message.replyTo { ReplyQuote(model: model, conversationID: message.conversationID, outgoing: message.outgoing, replyID: reply, original: replyOriginal) }
+            ForEach(message.attachments) { attachment in AttachmentView(model: model, directory: directory, attachment: attachment, maxWidth: maxWidth - (imageOnly ? 0 : 24), outgoing: message.outgoing) }
             if !message.body.isEmpty {
                 Text(MessageText.linkified(message.body)).font(.system(size: 14)).lineSpacing(2).textSelection(.enabled)
                     .tint(message.outgoing ? .white : archiveAccent)
@@ -430,21 +596,22 @@ private struct MessageBubble: View {
 
 
 private struct ReplyQuote: View {
-    @EnvironmentObject private var model: ArchiveModel
-    let message: MessageRecord
+    let model: ArchiveModel
+    let conversationID: String
+    let outgoing: Bool
     let replyID: String
+    let original: MessageRecord?
     var body: some View {
-        let original = model.messages.first { $0.id == replyID }
-        Button { model.showReply(message) } label: {
+        Button { model.select(conversationID, messageID: replyID) } label: {
             HStack(spacing: 8) {
-                RoundedRectangle(cornerRadius: 1.5).fill(message.outgoing ? Color.white.opacity(0.85) : archiveAccent).frame(width: 3)
+                RoundedRectangle(cornerRadius: 1.5).fill(outgoing ? Color.white.opacity(0.85) : archiveAccent).frame(width: 3)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(original.map { $0.outgoing ? "You" : $0.sender } ?? "Earlier message").font(.caption.weight(.semibold))
                     Text(verbatim: original?.preview ?? "Show the original message").font(.caption).lineLimit(2)
                 }
             }
             .padding(.horizontal, 8).padding(.vertical, 6)
-            .background(message.outgoing ? Color.white.opacity(0.16) : Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .background(outgoing ? Color.white.opacity(0.16) : Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
         }.buttonStyle(.plain).help("Show the replied-to message")
     }
 }
@@ -466,12 +633,13 @@ private struct ReactionBadges: View {
 }
 
 private struct AttachmentView: View {
-    @EnvironmentObject private var model: ArchiveModel
+    let model: ArchiveModel
+    let directory: URL?
     @State private var showingContact = false
     let attachment: AttachmentRecord
     let maxWidth: CGFloat
     let outgoing: Bool
-    private var localURL: URL? { model.directory.flatMap { attachment.localURL(in: $0) } }
+    private var localURL: URL? { directory.flatMap { attachment.localURL(in: $0) } }
 
     var body: some View {
         if let url = localURL {
@@ -509,30 +677,31 @@ private struct AttachmentView: View {
 }
 
 struct OutboxBubble: View {
-    @EnvironmentObject private var model: ArchiveModel
+    @Environment(ArchiveModel.self) private var model
     let message: OutboxRecord
     let spare: CGFloat
+    var first = true
     private var attention: Bool { message.state == "unknown" || message.state == "failed" }
     var body: some View {
         VStack(alignment: .trailing, spacing: 3) {
             VStack(alignment: .leading, spacing: 6) {
+                if let reply = message.command?.replyTo { ReplyQuote(model: model, conversationID: message.conversationID, outgoing: true, replyID: reply, original: model.messages.first { $0.id == reply }) }
                 ForEach(message.files) { file in Label(file.name, systemImage: file.mime.hasPrefix("image/") ? "photo" : "doc").font(.callout) }
                 if !message.body.isEmpty { Text(verbatim: message.body).font(.system(size: 14)).lineSpacing(2).textSelection(.enabled) }
             }
             .padding(.horizontal, 12).padding(.vertical, 8).foregroundStyle(.white)
-            .background(archiveBubble.opacity(message.state == "failed" ? 0.45 : 0.72), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .background(archiveBubble.opacity(message.state == "failed" ? 0.45 : 1), in: UnevenRoundedRectangle(topLeadingRadius: 18, bottomLeadingRadius: 18, bottomTrailingRadius: 18, topTrailingRadius: first ? 18 : 5))
             HStack(spacing: 5) {
-                if ["preparing", "sending", "accepted", "confirmed"].contains(message.state) { ProgressView().controlSize(.mini) }
-                Text(message.label).font(.caption2).foregroundStyle(attention ? .orange : .secondary)
-            }.padding(.horizontal, 6)
+                if !attention { ProgressView().controlSize(.mini).scaleEffect(0.65).frame(width: 10, height: 10) }
+                Text(attention ? message.label : message.state == "confirmed" ? "Updating…" : "Sending…").font(.caption2).foregroundStyle(attention ? .orange : .secondary)
+            }.frame(minHeight: 14).padding(.horizontal, 6).help(message.label)
             if message.state == "failed" {
                 Button("Restore as Draft") { model.restoreDraft(message) }.controlSize(.small)
                     .disabled(!model.draft.body.isEmpty || !model.draft.attachments.isEmpty)
             }
         }
-        .padding(.top, 8).padding(.leading, max(24, spare)).frame(maxWidth: .infinity, alignment: .trailing)
+        .padding(.top, first ? 8 : 2).padding(.leading, max(24, spare)).frame(maxWidth: .infinity, alignment: .trailing)
         .id("outbox-" + message.id)
-        .transition(.asymmetric(insertion: .move(edge: .bottom).combined(with: .opacity).combined(with: .scale(scale: 0.9, anchor: .bottomTrailing)), removal: .opacity))
     }
 }
 
@@ -540,7 +709,7 @@ struct OutboxBubble: View {
 
 // Results drop down beneath the toolbar find field without pushing the timeline.
 private struct ThreadResultsPanel: View {
-    @EnvironmentObject private var model: ArchiveModel
+    @Environment(ArchiveModel.self) private var model
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {

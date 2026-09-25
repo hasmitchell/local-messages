@@ -81,10 +81,18 @@ func watch(ctx context.Context, store *archive.Store, opts Options, output io.Wr
 	defer func() { stopCommands(); <-commandDone }()
 	encoder := json.NewEncoder(output)
 	var outputMu sync.Mutex
+	var last Status
+	// Each sync pass reports its state. Only changes are written: every line
+	// wakes the app, and an unchanged status would only cost it a redraw.
 	emit := func(state string) {
 		outputMu.Lock()
 		defer outputMu.Unlock()
-		_ = encoder.Encode(Status{State: state, Time: time.Now().UTC().Format(time.RFC3339), Connection: router.token()})
+		status := Status{State: state, Time: time.Now().UTC().Format(time.RFC3339), Connection: router.token()}
+		if status.State == last.State && status.Connection == last.Connection {
+			return
+		}
+		last = status
+		_ = encoder.Encode(status)
 	}
 	typing := func(conversationID string, active bool) {
 		outputMu.Lock()

@@ -3,7 +3,7 @@ import SQLite3
 
 private func authorizeArchiveRead(_ context: UnsafeMutableRawPointer?, _ action: Int32, _ first: UnsafePointer<CChar>?, _ second: UnsafePointer<CChar>?, _ database: UnsafePointer<CChar>?, _ source: UnsafePointer<CChar>?) -> Int32 {
     switch action {
-    case SQLITE_SELECT, SQLITE_READ, SQLITE_FUNCTION, SQLITE_RECURSIVE: return SQLITE_OK
+    case SQLITE_SELECT, SQLITE_READ, SQLITE_FUNCTION, SQLITE_RECURSIVE, SQLITE_TRANSACTION: return SQLITE_OK
     // FTS5 checks this read-only pragma when preparing a search.
     case SQLITE_PRAGMA:
         return first.map { String(cString: $0) == "data_version" } == true && second == nil ? SQLITE_OK : SQLITE_DENY
@@ -79,6 +79,7 @@ private final class ReadStatement {
 
 actor ArchiveDatabase {
     private let connection: ReadConnection
+    private var imageCount: (value: Int, messages: Int, at: Date)?
     let directory: URL
     init(directory: URL) throws {
         self.directory = directory
@@ -103,6 +104,18 @@ actor ArchiveDatabase {
         var result: [OutboxRecord] = []
         while try rows.next() { result.append(OutboxRecord(id: rows.text(0), conversationID: rows.text(1), body: rows.text(2), state: rows.text(3), reason: rows.text(4), remoteID: rows.text(5), created: rows.integer(6), command: try? JSONDecoder().decode(SendCommand.self, from: rows.data(7)))) }
         return result
+    }
+    struct TimelineSnapshot: Sendable { let window: MessageWindow; let outbox: [OutboxRecord] }
+    func timeline(conversation: String, visible: [MessageRecord]? = nil, followingLatest: Bool = true, messageID: String? = nil) throws -> TimelineSnapshot {
+        // The worker can confirm a send between reads. One read transaction
+        // prevents a frame containing both copies, or neither copy.
+        guard sqlite3_exec(connection.handle, "BEGIN DEFERRED", nil, nil, nil) == SQLITE_OK else { throw ArchiveFailure.reading }
+        defer { sqlite3_exec(connection.handle, "ROLLBACK", nil, nil, nil) }
+        let window: MessageWindow
+        if let messageID { window = try around(messageID: messageID, conversation: conversation) }
+        else if let visible { window = try refresh(visible, conversation: conversation, followingLatest: followingLatest) }
+        else { window = try latest(conversation: conversation) }
+        return try TimelineSnapshot(window: window, outbox: outbox(conversation: conversation))
     }
     struct SubmissionStatus: Sendable { let state, reason, remoteID: String }
     func submission(_ id: String) throws -> SubmissionStatus? {
@@ -199,12 +212,28 @@ actor ArchiveDatabase {
         let stats = try ReadStatement(connection, "SELECT count(*),coalesce(max(timestamp),0) FROM messages")
         guard try stats.next() else { throw ArchiveFailure.reading }
         let count = Int(stats.integer(0)), newest = stats.integer(1)
-        let media = try ReadStatement(connection, """
-            SELECT count(*) FROM messages m,json_each(m.payload,'$.attachments') a
-            WHERE json_extract(a.value,'$.state')='downloaded_original' AND json_extract(a.value,'$.mime') LIKE 'image/%'
-            """)
-        guard try media.next() else { throw ArchiveFailure.reading }
-        return ArchiveOverview(conversations: conversations, messageCount: count, imageCount: Int(media.integer(0)), newest: newest > 0 ? Date(timeIntervalSince1970: Double(newest) / 1_000_000) : nil)
+        // Counting photos reads every payload (most of this method's time). The
+        // figure only feeds the status line, so reuse it unless messages were
+        // added or removed, refreshing it at most once a minute otherwise.
+        let images: Int
+        if let cached = imageCount, cached.messages == count, Date().timeIntervalSince(cached.at) < 60 {
+            images = cached.value
+        } else {
+            let media = try ReadStatement(connection, """
+                SELECT count(*) FROM messages m,json_each(m.payload,'$.attachments') a
+                WHERE json_extract(a.value,'$.state')='downloaded_original' AND json_extract(a.value,'$.mime') LIKE 'image/%'
+                """)
+            guard try media.next() else { throw ArchiveFailure.reading }
+            images = Int(media.integer(0))
+            imageCount = (images, count, Date())
+        }
+        // Resolve validated file paths off the main actor once per snapshot,
+        // rather than doing filesystem work for every sidebar redraw.
+        var avatarURLs: [String: URL] = [:]
+        for conversation in conversations {
+            if let url = conversation.avatarURL(in: directory) { avatarURLs[conversation.id] = url }
+        }
+        return ArchiveOverview(conversations: conversations, messageCount: count, imageCount: images, newest: newest > 0 ? Date(timeIntervalSince1970: Double(newest) / 1_000_000) : nil, avatarURLs: avatarURLs)
     }
 
     func latest(conversation: String) throws -> MessageWindow {
@@ -232,7 +261,18 @@ actor ArchiveDatabase {
         guard let first = messages.first, let last = messages.last else { return MessageWindow(messages: [], hasEarlier: false, hasLater: false) }
         let earlier = try scalar("SELECT EXISTS(SELECT 1 FROM messages WHERE conversation_id=? AND (timestamp<? OR (timestamp=? AND id<?)))", [.text(conversation), .integer(first.timestamp), .integer(first.timestamp), .text(first.id)])
         let later = try scalar("SELECT EXISTS(SELECT 1 FROM messages WHERE conversation_id=? AND (timestamp>? OR (timestamp=? AND id>?)))", [.text(conversation), .integer(last.timestamp), .integer(last.timestamp), .text(last.id)])
-        return MessageWindow(messages: messages, hasEarlier: earlier == 1, hasLater: later == 1)
+        var submissions: [String: String] = [:]
+        if try hasTable("outbox") {
+            // Keep a bubble's identity when its temporary send ID is replaced
+            // by the phone's message ID. Match IDs, never message text.
+            let rows = try ReadStatement(connection, """
+                SELECT o.remote_id,o.id FROM outbox o JOIN messages m ON m.id=o.remote_id
+                WHERE o.conversation_id=? AND m.conversation_id=? AND o.state='confirmed'
+                ORDER BY o.created,o.id
+                """, [.text(conversation), .text(conversation)])
+            while try rows.next() { if submissions[rows.text(0)] == nil { submissions[rows.text(0)] = rows.text(1) } }
+        }
+        return MessageWindow(messages: messages, hasEarlier: earlier == 1, hasLater: later == 1, submissions: submissions)
     }
 
     static func literalQuery(_ query: String) -> String {

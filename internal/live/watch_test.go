@@ -90,6 +90,28 @@ func TestWorkerRetriesAndStopsItsSession(t *testing.T) {
 		}
 	}
 }
+func TestWorkerReportsOnlyStatusChanges(t *testing.T) {
+	store, err := archive.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	// The session loop runs every two seconds; this spans at least two passes.
+	ctx, cancel := context.WithTimeout(context.Background(), 2500*time.Millisecond)
+	defer cancel()
+	connected := 0
+	output := &statusWriter{onStatus: func(s Status) {
+		if s.State == "connected" {
+			connected++
+		}
+	}}
+	_ = watch(ctx, store, Options{Since: time.Now().AddDate(-1, 0, 0), MaxPages: 100, Media: "none"}, output, func(_ context.Context, _ string, observe func(any)) (source, error) {
+		return &fakeSource{observer: observe}, nil
+	})
+	if connected != 1 {
+		t.Fatalf("connected reported %d times; repeats wake the app for nothing", connected)
+	}
+}
 func TestUnavailablePairingAndLogoutDoNotReconnectForever(t *testing.T) {
 	for _, logout := range []bool{false, true} {
 		t.Run(map[bool]string{false: "keychain", true: "logged_out"}[logout], func(t *testing.T) {

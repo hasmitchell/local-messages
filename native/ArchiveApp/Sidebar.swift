@@ -2,15 +2,19 @@ import AppKit
 import SwiftUI
 
 struct ArchiveSidebar: View {
-    @EnvironmentObject private var model: ArchiveModel
+    @Environment(ArchiveModel.self) private var model
     @State private var awayFromTop = false
 
     var body: some View {
+        @Bindable var bindable = model
+        #if UI_SNAPSHOTS
+        let _ = RenderCount.bump("sidebar")
+        #endif
         Group {
             if model.isSearching { SearchResultsList() } else { conversationList }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) { SidebarStatusBar() }
-        .modifier(SidebarSearch(query: $model.query, focusToken: model.focusSearch))
+        .modifier(SidebarSearch(query: $bindable.query, focusToken: model.focusSearch))
         .toolbar {
             ToolbarItem {
                 Button { model.startError = nil; model.showingNewMessage = true } label: { Label("New Message", systemImage: "square.and.pencil") }
@@ -23,17 +27,21 @@ struct ArchiveSidebar: View {
     }
 
     private var conversationList: some View {
-        ScrollViewReader { reader in
+        @Bindable var bindable = model
+        #if UI_SNAPSHOTS
+        RenderCount.bump("conversations")
+        #endif
+        return ScrollViewReader { reader in
             List(selection: Binding(get: { model.selectedID }, set: { if let id = $0 { model.select(id) } })) {
                 Section {
                     ForEach(model.visibleConversations) { conversation in
-                        ConversationRow(conversation: conversation, unread: model.isUnread(conversation), draft: model.drafts[conversation.id], avatar: model.avatarURL(conversation), typing: model.isTyping(conversation.id))
+                        ConversationRow(conversation: conversation, unread: model.isUnread(conversation), draft: model.draftPreviews[conversation.id], avatar: model.avatarURL(conversation), typing: model.isTyping(conversation.id))
                             .tag(conversation.id).id(conversation.id)
                             .listRowInsets(EdgeInsets(top: 4, leading: 8, bottom: 4, trailing: 10))
                     }
                 } header: {
                     if model.overview != nil {
-                        Picker("Folder", selection: $model.filter) {
+                        Picker("Folder", selection: $bindable.filter) {
                             ForEach(ConversationFilter.allCases) { Text($0.rawValue).tag($0) }
                         }
                         .pickerStyle(.segmented).labelsHidden().controlSize(.small)
@@ -113,7 +121,10 @@ struct ScrollEdgeObserver: ViewModifier {
         if #available(macOS 15, *) {
             content.onScrollGeometryChange(for: Bool.self) { geometry in
                 if edge == .top { geometry.contentOffset.y + geometry.contentInsets.top <= 100 }
-                else { geometry.contentSize.height + geometry.contentInsets.bottom - geometry.visibleRect.maxY <= 60 }
+                // The visible rect includes the area under the toolbar. Using
+                // containerSize alone counts that inset as unseen messages and
+                // leaves the jump button visible even after scrollTo(.bottom).
+                else { geometry.contentSize.height - geometry.visibleRect.maxY <= 60 }
             } action: { _, atEdge in changed(atEdge) }
         } else { content }
     }
@@ -162,7 +173,7 @@ private struct ConversationRow: View {
 }
 
 private struct SearchResultsList: View {
-    @EnvironmentObject private var model: ArchiveModel
+    @Environment(ArchiveModel.self) private var model
     var body: some View {
         List(selection: Binding<String?>(get: { model.highlightedID }, set: { id in
             if let result = model.searchResults.first(where: { $0.id == id }) { model.select(result.conversationID, messageID: result.id) }
@@ -211,7 +222,7 @@ private struct SearchResultsList: View {
 }
 
 private struct SidebarStatusBar: View {
-    @EnvironmentObject private var model: ArchiveModel
+    @Environment(ArchiveModel.self) private var model
     private var statusColor: Color {
         switch model.syncState {
         case .connected, .photosPending: .green

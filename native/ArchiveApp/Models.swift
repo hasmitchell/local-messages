@@ -136,17 +136,19 @@ struct MessageRecord: Decodable, Identifiable, Sendable, Hashable {
     }
 }
 
-struct ArchiveOverview: Sendable {
+struct ArchiveOverview: Sendable, Equatable {
     let conversations: [ConversationRecord]
     let messageCount: Int
     let imageCount: Int
     let newest: Date?
+    var avatarURLs: [String: URL] = [:]
 }
 
 struct MessageWindow: Sendable {
     let messages: [MessageRecord]
     let hasEarlier: Bool
     let hasLater: Bool
+    var submissions: [String: String] = [:]
 }
 
 struct SearchPage: Sendable {

@@ -17,3 +17,6 @@ swiftc -swift-version 6 -parse-as-library -module-cache-path .cache/swift-module
   native/ArchiveApp/Accounts.swift native/ArchiveApp/SyncController.swift native/ArchiveApp/ComposerModels.swift native/ArchiveApp/DraftAttachments.swift native/ArchiveApp/ArchiveSettings.swift \
   native/ArchiveAppTests/AccountsTests.swift -o build/gm-account-tests
 build/gm-account-tests
+swiftc -swift-version 6 -parse-as-library -module-cache-path .cache/swift-modules \
+  native/ArchiveApp/EmojiShortcuts.swift native/ArchiveApp/ComposerTextView.swift native/ArchiveAppTests/ComposerTests.swift -o build/gm-composer-tests
+build/gm-composer-tests

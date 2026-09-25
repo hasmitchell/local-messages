@@ -3,7 +3,7 @@ import SwiftUI
 
 // Inspector content: contact details plus the conversation's photo, link and file library.
 struct ConversationInfo: View {
-    @EnvironmentObject private var model: ArchiveModel
+    @Environment(ArchiveModel.self) private var model
     @State private var tab = "Photos"
     @State private var contactURL: URL?
     @State private var showingContact = false

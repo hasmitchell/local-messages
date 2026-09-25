@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct RelinkView: View {
-    @EnvironmentObject private var model: ArchiveModel
+    @Environment(ArchiveModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var controller: RelinkController
 

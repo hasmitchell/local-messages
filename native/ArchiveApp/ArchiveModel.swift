@@ -7,79 +7,85 @@ enum ConversationFilter: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
-@MainActor
-final class ArchiveModel: ObservableObject {
-    @Published var overview: ArchiveOverview?
-    @Published var directory: URL?
-    @Published var selectedID: String?
-    @Published var messages: [MessageRecord] = []
-    @Published var query = ""
-    @Published var filter: ConversationFilter = .inbox
-    @Published var searchResults: [MessageRecord] = []
-    @Published var searchTotal = 0
-    @Published var searching = false
-    @Published var loading = false
-    @Published var loadingMessages = false
-    @Published var paging = false
-    @Published var hasEarlier = false
-    @Published var hasLater = false
-    @Published var error: String?
-    @Published var searchError: String?
-    @Published var highlightedID: String?
-    @Published var scrollRequest: ScrollRequest?
-    @Published var previewURL: URL?
-    @Published var focusSearch = UUID()
-    @Published var timelineAtBottom = true
-    @Published var showingThreadSearch = false
-    @Published var threadQuery = ""
-    @Published var threadResults: [MessageRecord] = []
-    @Published var threadTotal = 0
-    @Published var threadSearching = false
-    @Published var threadError: String?
-    @Published var showingDetails = false
-    @Published var windowIsKey = true
-    @Published var showingNewMessage = false
-    @Published var pendingStart: PendingStart?
-    @Published var startError: String?
+// Observation tracks each property separately: a view redraws only when a value
+// it read changes. Bookkeeping that views never read is ignored, so writes to it
+// (including caches filled during a redraw) invalidate nothing.
+@MainActor @Observable
+final class ArchiveModel {
+    var overview: ArchiveOverview?
+    var directory: URL?
+    var selectedID: String?
+    var messages: [MessageRecord] = []
+    var query = ""
+    var filter: ConversationFilter = .inbox
+    var searchResults: [MessageRecord] = []
+    var searchTotal = 0
+    var searching = false
+    var loading = false
+    var loadingMessages = false
+    var paging = false
+    var hasEarlier = false
+    var hasLater = false
+    var error: String?
+    var searchError: String?
+    var highlightedID: String?
+    var scrollRequest: ScrollRequest?
+    var previewURL: URL?
+    var focusSearch = UUID()
+    var timelineAtBottom = true
+    var showingThreadSearch = false
+    var threadQuery = ""
+    var threadResults: [MessageRecord] = []
+    var threadTotal = 0
+    var threadSearching = false
+    var threadError: String?
+    var showingDetails = false
+    var windowIsKey = true
+    var showingNewMessage = false
+    var pendingStart: PendingStart?
+    var startError: String?
     struct PendingStart: Equatable { let id, number: String; let started: Date }
-    private var markedRead: [String: String] = [:]
+    @ObservationIgnored private var markedRead: [String: String] = [:]
     var canStartConversation: Bool { canSync && syncEnabled && syncState.canSend && !pairingBusy && pendingStart == nil }
-    @Published private(set) var seenRevision = 0
-    private var seenStore: SeenStore?
-    @Published var library = ConversationLibrary()
-    @Published var libraryLoading = false
-    @Published var libraryError: String?
-    @Published var settings = ArchiveSettings.initial
-    @Published var savingSettings = false
-    @Published var settingsNotice: String?
-    @Published var settingsError: String?
-    @Published var stagingAttachments = false
-    @Published var pendingReactions: [String: String] = [:]
-    private let settingsRepository = SettingsRepository()
-    private let attachmentStager = AttachmentStager()
-    private var threadSearchTask: Task<Void, Never>?
-    private var threadSearchGeneration = UUID()
-    private var libraryGeneration = UUID()
-    private var libraryLimit = 300
+    private(set) var seenRevision = 0
+    @ObservationIgnored private var seenStore: SeenStore?
+    var library = ConversationLibrary()
+    var libraryLoading = false
+    var libraryError: String?
+    var settings = ArchiveSettings.initial
+    var savingSettings = false
+    var settingsNotice: String?
+    var settingsError: String?
+    var stagingAttachments = false
+    var pendingReactions: [String: String] = [:]
+    @ObservationIgnored private let settingsRepository = SettingsRepository()
+    @ObservationIgnored private let attachmentStager = AttachmentStager()
+    @ObservationIgnored private var threadSearchTask: Task<Void, Never>?
+    @ObservationIgnored private var threadSearchGeneration = UUID()
+    @ObservationIgnored private var libraryGeneration = UUID()
+    @ObservationIgnored private var libraryLimit = 300
 
-    @Published var syncState: SyncState = .local
-    @Published var canSync = false
-    @Published var syncEnabled = !UserDefaults.standard.bool(forKey: "syncPaused")
-    private lazy var syncController: SyncController = {
-        let controller = SyncController { [weak self] state in
-            guard let self else { return }
-            let wasReady = self.syncState.canSend
-            self.syncState = state
-            if state.canSend && !wasReady { self.sendPresence() }
-        }
+    var syncState: SyncState = .local
+    var canSync = false
+    var syncEnabled = !UserDefaults.standard.bool(forKey: "syncPaused")
+    @ObservationIgnored private lazy var syncController: SyncController = {
+        let controller = SyncController { [weak self] state in self?.syncStateChanged(state) }
         controller.onTyping = { [weak self] digest, active in self?.typingChanged(digest: digest, active: active) }
         return controller
     }()
+    func syncStateChanged(_ state: SyncState) {
+        // The worker repeats its status every pass. Publishing an unchanged
+        // value would re-render every view that reads the model.
+        guard state != syncState else { return }
+        let wasReady = syncState.canSend
+        syncState = state
+        if state.canSend && !wasReady { sendPresence() }
+    }
     /// Conversations where the other side is typing, by the worker's digest of the conversation id.
-    @Published private(set) var typingDigests: [String: Date] = [:]
-    private var typingDigestCache: [String: String] = [:]
-    private var lastTypingSent: (conversation: String, at: Date)?
-    private func typingChanged(digest: String, active: Bool) {
+    private(set) var typingDigests: [String: Date] = [:]
+    @ObservationIgnored private var typingDigestCache: [String: String] = [:]
+    @ObservationIgnored private var lastTypingSent: (conversation: String, at: Date)?
+    func typingChanged(digest: String, active: Bool) {
         if active { typingDigests[digest] = Date() } else { typingDigests.removeValue(forKey: digest) }
     }
     private func typingDigest(_ conversationID: String) -> String {
@@ -112,25 +118,61 @@ final class ArchiveModel: ObservableObject {
     }
     let relinking = RelinkController()
     let addingAccount = RelinkController()
-    @Published var accounts: [AccountProfile] = []
-    @Published var showingAccounts = false
-    @Published var showingAccountSetup = false
-    @Published var accountError: String?
-    @Published var settingUpAccount: AccountProfile?
-    private var accountStore: AccountStore?
-    var accountListAvailable: Bool { accountStore != nil }
+    var accounts: [AccountProfile] = []
+    var showingAccounts = false
+    var showingAccountSetup = false
+    var accountError: String?
+    var settingUpAccount: AccountProfile?
+    @ObservationIgnored private var accountStore: AccountStore?
+    private(set) var accountListAvailable = false
     var pairingBusy: Bool { relinking.busy || addingAccount.busy }
     var currentAccount: AccountProfile? { directory.flatMap { location in accounts.first { AccountStore.key($0.directory) == AccountStore.key(location) } } }
     var accountName: String { currentAccount?.name ?? (canSync ? "Current account" : "Local archive") }
-    @Published var drafts: [String: DraftRecord] = [:]
-    @Published var outbox: [OutboxRecord] = []
-    @Published var composerError: String?
-    private let draftRepository = DraftRepository()
-    private var draftRevision = 0
-    private var pendingScrollID: String?
-    private var arrivalSequence: Int64 = 0
+    let draftState = ComposerDraftState()
+    private(set) var draftPreviews: [String: DraftRecord] = [:]
+    var drafts: [String: DraftRecord] {
+        get { draftState.records }
+        set {
+            guard draftState.records != newValue else { return }
+            draftState.records = newValue
+            draftPreviews = newValue
+            let sending = Set(newValue.compactMap { $0.value.submissionID == nil ? nil : $0.key })
+            if sending != sendingDrafts { sendingDrafts = sending }
+        }
+    }
+    /// Conversations whose draft is out for sending. Kept apart from the text so
+    /// views that only need this are not redrawn on every keystroke.
+    private(set) var sendingDrafts: Set<String> = []
+    var draftSubmitted: Bool { selectedID.map(sendingDrafts.contains) ?? false }
+    @ObservationIgnored private var draftSaveTasks: [String: Task<Void, Never>] = [:]
+    var outbox: [OutboxRecord] = []
+    private(set) var localOutbox: [String: OutboxRecord] = [:]
+    private(set) var messageSubmissions: [String: String] = [:]
+    private(set) var sendPulse = UUID()
+    private var followingSubmission: String?
+    var followingOwnSend: Bool { followingSubmission != nil }
+    /// Counts wheel and trackpad scrolls; untracked, since no view draws it.
+    @ObservationIgnored private(set) var manualScrolls = 0
+    func userScrolledTimeline() { followingSubmission = nil; manualScrolls += 1 }
+    #if UI_SNAPSHOTS
+    @ObservationIgnored var simulatedSend: ((SendCommand) throws -> Void)?
+    #endif
+    var displayedOutbox: [OutboxRecord] {
+        let savedIDs = Set(outbox.map(\.id)), confirmedIDs = Set(messageSubmissions.values)
+        return (outbox + localOutbox.values.filter {
+            $0.conversationID == selectedID && !savedIDs.contains($0.id) && !confirmedIDs.contains($0.id)
+        }).sorted { $0.created == $1.created ? $0.id < $1.id : $0.created < $1.created }
+    }
+    var draftIsInTimeline: Bool {
+        guard let submission = draft.submissionID else { return false }
+        return displayedOutbox.contains { $0.id == submission }
+    }
+    var composerError: String?
+    @ObservationIgnored private let draftRepository = DraftRepository()
+    @ObservationIgnored private var draftRevision = 0
+    @ObservationIgnored private var arrivalSequence: Int64 = 0
     let notifications = MessageNotifications()
-    private var arrivalStart = Date()
+    @ObservationIgnored private var arrivalStart = Date()
     var draft: DraftRecord { selectedID.flatMap { drafts[$0] } ?? DraftRecord() }
     var canSendDraft: Bool { !pairingBusy && canSync && syncEnabled && syncState.canSend && selectedID != nil && draft.submissionID == nil && !stagingAttachments && draft.body.unicodeScalars.count <= 4000 && draft.body.utf8.count <= 16000 && (SendCommand.validBody(draft.body) || !draft.attachments.isEmpty) }
     var composerHint: String {
@@ -138,14 +180,15 @@ final class ArchiveModel: ObservableObject {
         if !canSync { return "Local draft · Sending requires a paired live archive" }
         if draft.body.unicodeScalars.count > 4000 || draft.body.utf8.count > 16000 { return "Use up to 4,000 characters" }
         if !syncEnabled || !syncState.canSend { return "Draft saved on this Mac · Connect your phone to send" }
-        return "Uses your phone’s SMS/RCS settings · Return adds a new line"
+        return "Uses your phone’s SMS/RCS settings · Shift-Return adds a new line"
     }
     func editDraft(_ body: String) {
         guard let id = selectedID, draft.submissionID == nil, let directory else { return }
         let previous = draft.body
-        drafts[id] = DraftRecord(body: body, files: draft.files, replyTo: draft.replyTo)
-        composerError = nil
-        persistDrafts(directory: directory)
+        guard previous != body else { return }
+        draftState.records[id] = DraftRecord(body: body, files: draft.files, replyTo: draft.replyTo)
+        if composerError != nil { composerError = nil }
+        persistDrafts(directory: directory, debounce: true)
         if body.count > previous.count { sendTypingIfNeeded(id) }
     }
     /// The message the draft will quote; nil when it is not in the loaded page.
@@ -187,37 +230,84 @@ final class ArchiveModel: ObservableObject {
         let record = ConversationRecord(id: entry.id, name: entry.name, folder: "INBOX", timestamp: 0, preview: "", messageCount: 0, participants: [ConversationParticipant(id: entry.id, name: entry.name, number: entry.number, isMe: false, avatarPath: path)])
         return record.avatarURL(in: directory)
     }
-    private func persistDrafts(directory: URL) {
+    private func persistDrafts(directory: URL, debounce: Bool = false) {
         draftRevision += 1
         let revision = draftRevision, snapshot = drafts, generation = archiveGeneration
-        Task {
-            do { try await draftRepository.save(snapshot, directory: directory, revision: revision) }
-            catch { if archiveGeneration == generation { composerError = "The draft could not be saved on this Mac." } }
+        draftSaveTasks[directory.path]?.cancel()
+        let repository = draftRepository
+        draftSaveTasks[directory.path] = Task { [weak self] in
+            do {
+                if debounce { try await Task.sleep(for: .milliseconds(300)) }
+                try Task.checkCancellation()
+                if let self, self.archiveGeneration == generation, self.draftPreviews != snapshot { self.draftPreviews = snapshot }
+                try await repository.save(snapshot, directory: directory, revision: revision)
+            } catch is CancellationError { }
+            catch {
+                if let self, self.archiveGeneration == generation { self.composerError = "The draft could not be saved on this Mac." }
+            }
         }
+    }
+    // A normal quit waits for pending saves, including another account's draft
+    // when the user has just switched accounts. Sending still saves immediately.
+    func finishDraftSaves() async {
+        for task in Array(draftSaveTasks.values) { await task.value }
     }
     func sendDraft() {
         guard canSendDraft, let id = selectedID, let directory else { return }
         let body = draft.body, submission = UUID().uuidString.lowercased(), generation = archiveGeneration
         let files = draft.files, replyTo = draft.replyTo
-        drafts[id] = DraftRecord(body: body, submissionID: submission, files: files, replyTo: replyTo)
+        let command = SendCommand(id: submission, conversationID: id, body: body, files: files, replyTo: replyTo)
+        followingSubmission = submission
+        let pending = OutboxRecord(id: submission, conversationID: id, body: body, state: "preparing", reason: "", remoteID: "", created: Int64(Date().timeIntervalSince1970 * 1_000_000), command: command)
+        // Settle layout first. The bubble and scroll animate independently;
+        // animating the entire stack makes its scroll target move underneath it.
+        withTransaction(Transaction(animation: nil)) {
+            drafts[id] = DraftRecord(body: body, submissionID: submission, files: files, replyTo: replyTo)
+            localOutbox[submission] = pending
+            sendPulse = UUID(uuidString: submission)!
+            if !hasLater {
+                highlightedID = nil
+                scrollRequest = ScrollRequest(messageID: "timeline-bottom", atBottom: true, animated: true)
+            }
+        }
+        revealLatestForSend(conversation: id)
         draftRevision += 1
         let revision = draftRevision, snapshot = drafts
         composerError = nil
-        Task {
+        draftSaveTasks[directory.path]?.cancel()
+        draftSaveTasks[directory.path] = Task {
             do {
                 // Keep the text and attempt ID on disk until the worker has
                 // committed an outbox row. A crash cannot silently lose a draft.
                 try await draftRepository.save(snapshot, directory: directory, revision: revision)
                 guard archiveGeneration == generation else { return }
-                try syncController.send(SendCommand(id: submission, conversationID: id, body: body, files: files, replyTo: replyTo))
-                if selectedID == id {
-                    showLatest()
-                    pendingScrollID = submission
-                    scrollRequest = ScrollRequest(messageID: "outbox-" + submission, atBottom: true)
-                }
+                #if UI_SNAPSHOTS
+                if let simulatedSend { try simulatedSend(command) }
+                else { try syncController.send(command) }
+                #else
+                try syncController.send(command)
+                #endif
             } catch {
-                if archiveGeneration == generation { composerError = "Send status is not confirmed. Your text is saved; check the phone before sending again." }
+                if archiveGeneration == generation {
+                    if followingSubmission == submission { followingSubmission = nil }
+                    localOutbox[submission] = OutboxRecord(id: submission, conversationID: id, body: body, state: "unknown", reason: "", remoteID: "", created: pending.created, command: command)
+                    composerError = "Send status is not confirmed. Your text is saved; check the phone before sending again."
+                }
             }
+        }
+    }
+    private func revealLatestForSend(conversation: String) {
+        guard hasLater, let reader = conversationDatabase else { return }
+        let generation = messageGeneration
+        Task {
+            do {
+                let window = try await reader.latest(conversation: conversation)
+                guard messageGeneration == generation, selectedID == conversation else { return }
+                // Keep the old history visible until the latest page is ready.
+                apply(window)
+                highlightedID = nil
+                scrollRequest = ScrollRequest(messageID: "timeline-bottom", atBottom: true, animated: true)
+            } catch { if messageGeneration == generation { self.error = readableError(error) } }
         }
     }
     func restoreDraft(_ message: OutboxRecord) {
@@ -233,6 +323,7 @@ final class ArchiveModel: ObservableObject {
                 try await acknowledgeDrafts(database, directory: directory, generation: generation)
                 if archiveGeneration == generation, draft.submissionID != nil {
                     if syncController.isStopped, let id = selectedID {
+                        if let submission = drafts[id]?.submissionID { localOutbox.removeValue(forKey: submission) }
                         drafts[id]?.submissionID = nil
                         persistDrafts(directory: directory)
                         composerError = "This attempt was not submitted. Your draft is ready to edit."
@@ -254,19 +345,21 @@ final class ArchiveModel: ObservableObject {
         if changed { persistDrafts(directory: directory) }
     }
 
-    private var refreshTask: Task<Void, Never>?
-    private var database: ArchiveDatabase?
-    private var archiveGeneration = UUID()
-    private var messageGeneration = UUID()
-    private var searchGeneration = UUID()
-    private var messageTask: Task<Void, Never>?
-    private var searchTask: Task<Void, Never>?
-    private var searchLimit = 100
+    @ObservationIgnored private var refreshTask: Task<Void, Never>?
+    @ObservationIgnored private var database: ArchiveDatabase?
+    @ObservationIgnored private var conversationDatabase: ArchiveDatabase?
+    @ObservationIgnored private var archiveGeneration = UUID()
+    @ObservationIgnored private var messageGeneration = UUID()
+    @ObservationIgnored private var searchGeneration = UUID()
+    @ObservationIgnored private var messageTask: Task<Void, Never>?
+    @ObservationIgnored private var searchTask: Task<Void, Never>?
+    @ObservationIgnored private var searchLimit = 100
 
     struct ScrollRequest: Equatable {
         let token = UUID()
         let messageID: String
         let atBottom: Bool
+        var animated = false
     }
 
     var conversations: [ConversationRecord] { overview?.conversations ?? [] }
@@ -287,7 +380,7 @@ final class ArchiveModel: ObservableObject {
     func conversationTitle(_ id: String) -> String { conversations.first { $0.id == id }?.title ?? "Conversation" }
 
     func start() {
-        do { accountStore = try AccountStore(); accounts = accountStore!.profiles }
+        do { accountStore = try AccountStore(); accounts = accountStore!.profiles; accountListAvailable = true }
         catch { accountError = "The account list could not be read. Your archives are still on this Mac. Restore the list before adding accounts." }
         if let directory = AccountLaunch.directory(arguments: CommandLine.arguments, savedPath: UserDefaults.standard.string(forKey: "archiveDirectory"), profiles: accounts) {
             open(directory)
@@ -332,6 +425,9 @@ final class ArchiveModel: ObservableObject {
         pendingReactions = [:]; stagingAttachments = false
         drafts = [:]
         outbox = []
+        localOutbox = [:]
+        followingSubmission = nil
+        messageSubmissions = [:]
         composerError = nil
         previewURL = nil; library = ConversationLibrary(); libraryLoading = false; libraryError = nil
         settingsNotice = nil; settingsError = nil
@@ -346,6 +442,7 @@ final class ArchiveModel: ObservableObject {
         error = nil
         overview = nil
         database = nil
+        conversationDatabase = nil
         selectedID = nil
         messages = []
         searchResults = []
@@ -358,17 +455,28 @@ final class ArchiveModel: ObservableObject {
         pendingStart = nil; startError = nil; showingNewMessage = false
         markedRead = [:]
         NSApp.dockTile.badgeLabel = nil
+        let pendingDraftSave = draftSaveTasks[url.path]
         Task {
             do {
                 let reader = try ArchiveDatabase(directory: url)
                 let snapshot = try await reader.overview()
                 let live = try await reader.isLive()
+                // A quick switch away and back can beat the typing debounce.
+                // Read only after that archive's latest draft is on disk.
+                await pendingDraftSave?.value
                 let savedDrafts = try await draftRepository.load(directory: url)
                 let savedSettings = try await settingsRepository.load(directory: url)
                 let cursor = try await reader.arrivalCursor()
                 guard archiveGeneration == generation else { return }
+                conversationDatabase = try ArchiveDatabase(directory: url)
                 database = reader
                 drafts = savedDrafts
+                for (conversation, draft) in savedDrafts {
+                    if let submission = draft.submissionID {
+                        let command = SendCommand(id: submission, conversationID: conversation, body: draft.body, files: draft.files, replyTo: draft.replyTo)
+                        localOutbox[submission] = OutboxRecord(id: submission, conversationID: conversation, body: draft.body, state: "unknown", reason: "", remoteID: "", created: 0, command: command)
+                    }
+                }
                 settings = savedSettings
                 arrivalSequence = cursor
                 arrivalStart = Date()
@@ -435,8 +543,7 @@ final class ArchiveModel: ObservableObject {
     private func refreshVisible(_ reader: ArchiveDatabase, generation: UUID) async throws {
         let snapshot = try await reader.overview()
         guard archiveGeneration == generation else { return }
-        overview = snapshot
-        updateBadge()
+        if overview != snapshot { overview = snapshot; updateBadge() }
         try await checkPendingStart(reader, generation: generation)
         if let directory { try await acknowledgeDrafts(reader, directory: directory, generation: generation) }
         for (message, submission) in pendingReactions {
@@ -445,27 +552,26 @@ final class ArchiveModel: ObservableObject {
         guard archiveGeneration == generation else { return }
         let messageToken = messageGeneration
         if let id = selectedID, !loadingMessages, !paging {
-            let following = TimelinePolicy.followsLatest(atBottom: timelineAtBottom, hasLater: hasLater, highlighting: highlightedID != nil)
-            let window = try await reader.refresh(messages, conversation: id, followingLatest: following)
-            guard archiveGeneration == generation, messageGeneration == messageToken, !paging else { return }
-            let pending = try await reader.outbox(conversation: id)
+            let following = followingSubmission != nil || TimelinePolicy.followsLatest(atBottom: timelineAtBottom, hasLater: hasLater, highlighting: highlightedID != nil)
+            let snapshot = try await reader.timeline(conversation: id, visible: messages, followingLatest: following)
+            let window = snapshot.window, pending = snapshot.outbox
             guard archiveGeneration == generation, messageGeneration == messageToken, !paging else { return }
             // Capture the position before adding rows changes the scrollable
             // height. Apply the rows and their scroll request in one UI update.
-            let shouldFollow = following && timelineAtBottom
-            if shouldFollow && (window.messages.count != messages.count || pending.count != outbox.count) {
-                withAnimation(Motion.spring) { apply(window); outbox = pending }
-            } else {
-                apply(window)
-                outbox = pending
-            }
-            if shouldFollow {
-                scrollRequest = ScrollRequest(messageID: "timeline-bottom", atBottom: true)
+            let shouldFollow = following && (timelineAtBottom || followingSubmission != nil)
+            let contentChanged = window.messages != messages || pending != outbox
+            let oldIDs = Set(messages.map { messageSubmissions[$0.id].map { "outbox-" + $0 } ?? $0.id } + displayedOutbox.filter { !$0.isReaction }.map { "outbox-" + $0.id })
+            let newIDs = Set(window.messages.map { window.submissions[$0.id].map { "outbox-" + $0 } ?? $0.id } + pending.filter { !$0.isReaction }.map { "outbox-" + $0.id })
+            let inserted = !newIDs.subtracting(oldIDs).isEmpty
+            // Confirmation keeps the existing row in place. Only new content
+            // asks for an animated scroll; status changes never replay the send.
+            var transaction = Transaction(animation: nil)
+            transaction.disablesAnimations = true
+            withTransaction(transaction) { apply(window); applyOutbox(pending) }
+            if let followingSubmission, window.submissions.values.contains(followingSubmission) { self.followingSubmission = nil }
+            if shouldFollow && contentChanged {
+                scrollRequest = ScrollRequest(messageID: "timeline-bottom", atBottom: true, animated: inserted)
                 if windowIsKey && NSApp.isActive { markVisibleAsSeen() }
-            }
-            if let pendingScrollID, pending.contains(where: { $0.id == pendingScrollID }) {
-                scrollRequest = ScrollRequest(messageID: "outbox-" + pendingScrollID, atBottom: true)
-                self.pendingScrollID = nil
             }
         }
         if showingThreadSearch && !threadQuery.isEmpty { scheduleThreadSearch() }
@@ -497,6 +603,14 @@ final class ArchiveModel: ObservableObject {
         select(id, force: true)
     }
 
+    func jumpToLatest() {
+        if hasLater { showLatest() }
+        else {
+            highlightedID = nil
+            scrollRequest = ScrollRequest(messageID: "timeline-bottom", atBottom: true, animated: true)
+        }
+    }
+
     func reload() {
         guard let directory else { chooseArchive(); return }
         let previous = selectedID
@@ -522,7 +636,8 @@ final class ArchiveModel: ObservableObject {
     }
 
     func select(_ id: String, messageID: String? = nil, force: Bool = false) {
-        guard let database else { return }
+        guard let database = conversationDatabase else { return }
+        if id != selectedID || messageID != nil || force { followingSubmission = nil }
         if !force, selectedID == id {
             if let messageID, messages.contains(where: { $0.id == messageID }) {
                 timelineAtBottom = false
@@ -538,12 +653,12 @@ final class ArchiveModel: ObservableObject {
         }
         timelineAtBottom = messageID == nil
         selectedID = id
-        pendingScrollID = nil
         highlightedID = messageID
         messageTask?.cancel()
         let generation = UUID()
         messageGeneration = generation
         messages = []
+        messageSubmissions = [:]
         outbox = []
         composerError = nil
         hasEarlier = false
@@ -553,14 +668,14 @@ final class ArchiveModel: ObservableObject {
         error = nil
         messageTask = Task {
             do {
-                let window: MessageWindow
-                if let messageID { window = try await database.around(messageID: messageID, conversation: id) }
-                else { window = try await database.latest(conversation: id) }
+                // Let the selection, title and empty loading state reach a frame
+                // before constructing the new message view hierarchy.
+                try await Task.sleep(for: .milliseconds(35))
                 guard !Task.isCancelled, messageGeneration == generation else { return }
-                let pending = try await database.outbox(conversation: id)
+                let snapshot = try await database.timeline(conversation: id, messageID: messageID)
                 guard !Task.isCancelled, messageGeneration == generation else { return }
-                apply(window)
-                outbox = pending
+                apply(snapshot.window)
+                applyOutbox(snapshot.outbox)
                 loadingMessages = false
                 if messageID == nil { markVisibleAsSeen() }
                 if let anchor = messageID ?? messages.last?.id {
@@ -578,6 +693,7 @@ final class ArchiveModel: ObservableObject {
         guard !paging, let database, let id = selectedID,
               let anchor = earlier ? messages.first : messages.last else { return }
         paging = true
+        followingSubmission = nil
         if earlier { timelineAtBottom = false }
         let generation = messageGeneration
         Task {
@@ -817,8 +933,11 @@ final class ArchiveModel: ObservableObject {
         pendingStart = nil
         startError = "No answer from the phone. Check that Google Messages is open on it, then try again."
     }
-    func isUnread(_ conversation: ConversationRecord) -> Bool { seenStore?.isUnread(conversation) ?? false }
-    func avatarURL(_ conversation: ConversationRecord) -> URL? { directory.flatMap { conversation.avatarURL(in: $0) } }
+    func isUnread(_ conversation: ConversationRecord) -> Bool {
+        _ = seenRevision
+        return seenStore?.isUnread(conversation) ?? false
+    }
+    func avatarURL(_ conversation: ConversationRecord) -> URL? { overview?.avatarURLs[conversation.id] }
     /// The toolbar find field was closed (Esc or its cancel button): clear its results.
     func threadSearchDismissed() {
         threadSearchTask?.cancel(); threadQuery = ""; threadResults = []; threadTotal = 0; threadSearching = false; highlightedID = nil
@@ -855,9 +974,16 @@ final class ArchiveModel: ObservableObject {
         NSApp.dockTile.badgeLabel = count > 0 ? count.formatted() : nil
     }
     private func apply(_ window: MessageWindow) {
-        messages = window.messages
-        hasEarlier = window.hasEarlier
-        hasLater = window.hasLater
+        if messageSubmissions != window.submissions { messageSubmissions = window.submissions }
+        for submission in window.submissions.values where localOutbox[submission] != nil { localOutbox.removeValue(forKey: submission) }
+        if messages != window.messages { messages = window.messages }
+        if hasEarlier != window.hasEarlier { hasEarlier = window.hasEarlier }
+        if hasLater != window.hasLater { hasLater = window.hasLater }
+    }
+    private func applyOutbox(_ pending: [OutboxRecord]) {
+        if outbox != pending { outbox = pending }
+        for record in pending where localOutbox[record.id] != nil { localOutbox.removeValue(forKey: record.id) }
+        if pending.contains(where: { $0.id == followingSubmission && ["unknown", "failed"].contains($0.state) }) { followingSubmission = nil }
     }
     private func readableError(_ error: Error) -> String {
         // Do not put decoded message values, SQL or private paths into alerts.

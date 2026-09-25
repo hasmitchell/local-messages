@@ -3,16 +3,26 @@ import SwiftUI
 
 @MainActor
 final class ArchiveAppDelegate: NSObject, NSApplicationDelegate {
+    weak var model: ArchiveModel?
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let model else { return .terminateNow }
+        Task {
+            await model.finishDraftSaves()
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 }
 
 @main
 struct LocalMessagesApp: App {
     @NSApplicationDelegateAdaptor(ArchiveAppDelegate.self) private var delegate
-    @StateObject private var model = ArchiveModel()
+    @State private var model = ArchiveModel()
     var body: some Scene {
         Window("Local Messages", id: "archive") {
-            ArchiveRootView().environmentObject(model).task {
+            ArchiveRootView().environment(model).task {
+                delegate.model = model
                 model.start()
                 #if UI_SNAPSHOTS
                 SnapshotRunner.schedule(model: model)
@@ -40,6 +50,6 @@ struct LocalMessagesApp: App {
                 Button("Reload Archive", action: model.reload).keyboardShortcut("r").disabled(model.loading)
             }
         }
-        Settings { AppSettingsView().environmentObject(model) }
+        Settings { AppSettingsView().environment(model) }
     }
 }

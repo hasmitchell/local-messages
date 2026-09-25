@@ -3,7 +3,8 @@
 # screen-recording permission. Usage: ./scripts/snapshot-app [scenario ...]
 # Scenarios: main search thread info inspector settings settings-general
 # settings-notifications settings-connection settings-history contact dark
-# draft old empty welcome accounts. Output: .cache/review-shots/<scenario>-N.png
+# draft old empty welcome accounts performance composer-checks send-animation.
+# Output: .cache/review-shots/<scenario>-N.png (or JSON for checks/measurements).
 set -eu
 task_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$task_root"
@@ -13,9 +14,8 @@ task_shots="$task_root/.cache/review-shots"
 task_fixture="$task_root/.cache/review-fixture"
 rm -rf "$task_app" "$task_fixture"
 mkdir -p "$task_app/Contents/MacOS" "$task_app/Contents/Resources" "$task_shots" .cache/swift-modules
-python3 native/ArchiveAppTests/make_fixture.py "$task_fixture" >/dev/null
 swiftc -D UI_SNAPSHOTS -swift-version 6 -parse-as-library -O -module-cache-path .cache/swift-modules \
-  -target "$(uname -m)-apple-macos14.0" native/ArchiveApp/*.swift native/ArchiveAppTests/Snapshots.swift \
+  -target "$(uname -m)-apple-macos14.0" native/ArchiveApp/*.swift native/ArchiveAppTests/Snapshots.swift native/ArchiveAppTests/Responsiveness.swift native/ArchiveAppTests/SendAnimation.swift \
   -lsqlite3 -o "$task_app/Contents/MacOS/Local Messages Review"
 if [ -f "build/Local Messages.app/Contents/Resources/AppIcon.icns" ]; then
   cp "build/Local Messages.app/Contents/Resources/AppIcon.icns" "$task_app/Contents/Resources/"
@@ -31,8 +31,8 @@ cat > "$task_app/Contents/Info.plist" <<PLIST
   <key>CFBundleExecutable</key><string>Local Messages Review</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.8.3</string>
-  <key>CFBundleVersion</key><string>17</string>
+  <key>CFBundleShortVersionString</key><string>0.8.7</string>
+  <key>CFBundleVersion</key><string>21</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSPrincipalClass</key><string>NSApplication</string>
@@ -44,7 +44,10 @@ codesign --force --sign - "$task_app" 2>/dev/null
 defaults delete "$task_id" >/dev/null 2>&1 || true
 [ "$#" -gt 0 ] || set -- main search thread inspector settings dark
 for scenario in "$@"; do
-  rm -f "$task_fixture/drafts/drafts.json"
+  # Send checks mutate the synthetic database; each scenario starts fresh.
+  rm -rf "$task_fixture"
+  python3 native/ArchiveAppTests/make_fixture.py "$task_fixture" >/dev/null
+  case "$scenario" in performance|composer-checks|send-animation) rm -f "$task_shots/$scenario.json";; esac
   case "$scenario" in settings-*) defaults write "$task_id" settingsTab "${scenario#settings-}";; esac
   if [ "$scenario" = welcome ]; then
     perl -e 'alarm 60; exec @ARGV' -- "$task_app/Contents/MacOS/Local Messages Review" --snapshot "$task_shots" --scenario welcome >/dev/null 2>&1 || true
@@ -52,6 +55,18 @@ for scenario in "$@"; do
     perl -e 'alarm 60; exec @ARGV' -- "$task_app/Contents/MacOS/Local Messages Review" --archive "$task_fixture" \
       --snapshot "$task_shots" --scenario "$scenario" --width "${SNAPSHOT_WIDTH:-1160}" >/dev/null 2>&1 || true
   fi
+  case "$scenario" in
+    performance|composer-checks|send-animation)
+      python3 - "$task_shots/$scenario.json" "$scenario" <<'PY'
+import json, sys
+with open(sys.argv[1]) as file:
+    result = json.load(file)
+if sys.argv[2] in ('composer-checks', 'send-animation') and result.get('passed') is not True:
+    raise SystemExit(result.get('error', 'Composer integration checks failed'))
+print(json.dumps(result, sort_keys=True))
+PY
+      ;;
+  esac
 done
 defaults delete "$task_id" >/dev/null 2>&1 || true
 ls "$task_shots"

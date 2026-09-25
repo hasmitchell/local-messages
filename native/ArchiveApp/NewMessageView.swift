@@ -3,7 +3,7 @@ import SwiftUI
 // Starts a conversation with a contact or phone number. The phone resolves the
 // number to an existing thread or creates one; the app then opens it.
 struct NewMessageView: View {
-    @EnvironmentObject private var model: ArchiveModel
+    @Environment(ArchiveModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @State private var query = ""
     @State private var results: [ContactEntry] = []

@@ -40,15 +40,20 @@ enum Motion {
     static let spring = Animation.spring(response: 0.38, dampingFraction: 0.78)
     static let quick = Animation.spring(response: 0.26, dampingFraction: 0.82)
     static let bouncy = Animation.spring(response: 0.32, dampingFraction: 0.55)
+    @MainActor static var send: Animation {
+        NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+            ? .easeOut(duration: 0.12) : .spring(response: 0.36, dampingFraction: 0.84)
+    }
 }
 
 // Icon buttons that squash on press and spring back.
 struct BouncyButtonStyle: ButtonStyle {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .scaleEffect(configuration.isPressed ? 0.86 : 1)
+            .scaleEffect(configuration.isPressed && !reduceMotion ? 0.86 : 1)
             .opacity(configuration.isPressed ? 0.8 : 1)
-            .animation(Motion.bouncy, value: configuration.isPressed)
+            .animation(reduceMotion ? .easeOut(duration: 0.1) : Motion.bouncy, value: configuration.isPressed)
     }
 }
 extension ButtonStyle where Self == BouncyButtonStyle {

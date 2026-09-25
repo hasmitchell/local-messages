@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct AccountMenu: View {
-    @EnvironmentObject private var model: ArchiveModel
+    @Environment(ArchiveModel.self) private var model
     var body: some View {
         Menu {
             ForEach(model.accounts) { profile in
@@ -25,7 +25,7 @@ struct AccountMenu: View {
 }
 
 struct AccountsView: View {
-    @EnvironmentObject private var model: ArchiveModel
+    @Environment(ArchiveModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var pairing: RelinkController
     @State private var name = ""
@@ -110,7 +110,7 @@ struct AccountsView: View {
 }
 
 private struct AccountProfileRow: View {
-    @EnvironmentObject private var model: ArchiveModel
+    @Environment(ArchiveModel.self) private var model
     let profile: AccountProfile
     @State private var name = ""
     var body: some View {

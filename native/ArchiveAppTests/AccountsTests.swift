@@ -56,10 +56,11 @@ import Foundation
         #!/bin/sh
         archive="$3"
         printf '%s\\n' "start:$archive" >> '\(events.path)'
-        trap 'printf "%s\\n" "stop:$archive" >> "\(events.path)"; exit 0' TERM
+        trap 'printf "%s\\n" "stop:$archive" >> "\(events.path)"' EXIT
+        trap 'exit 0' TERM
         echo '{"state":"connected","time":"2026-09-11T04:00:00Z","connection":"synthetic"}'
         read ignored
-        printf '%s\\n' "stop:$archive" >> '\(events.path)'
+        exit 0
         """
         try Data(script.utf8).write(to: worker)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: worker.path)

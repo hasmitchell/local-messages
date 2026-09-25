@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 struct AppSettingsView: View {
-    @EnvironmentObject private var model: ArchiveModel
+    @Environment(ArchiveModel.self) private var model
     @AppStorage("appearance") private var appearance = "system"
     @AppStorage("settingsTab") private var tab = "general"
 
@@ -24,6 +24,7 @@ private struct GeneralSettings: View {
     @AppStorage("markReadOnPhone") private var markReadOnPhone = true
     @AppStorage("spellCheck") private var spellCheck = true
     @AppStorage("autocorrect") private var autocorrect = false
+    @AppStorage("emojiShortcuts") private var emojiShortcuts = true
     var body: some View {
         Form {
             Section("Appearance") {
@@ -40,8 +41,10 @@ private struct GeneralSettings: View {
             Section("Writing") {
                 Toggle("Check spelling while typing", isOn: $spellCheck)
                 Toggle("Correct spelling automatically", isOn: $autocorrect)
+                Toggle("Replace emoticons with emoji as you type", isOn: $emojiShortcuts)
+                Text("Try :)  ;)  :D  or <3. Use the smiley button for Emoji & Symbols.").font(.caption).foregroundStyle(.secondary)
             }
-        }.formStyle(.grouped).frame(height: 400)
+        }.formStyle(.grouped).frame(height: 490)
     }
 }
 
@@ -73,7 +76,7 @@ private struct NotificationSettingsPane: View {
 }
 
 private struct ConnectionSettings: View {
-    @EnvironmentObject private var model: ArchiveModel
+    @Environment(ArchiveModel.self) private var model
     @State private var showingReconnect = false
     private var statusColor: Color {
         switch model.syncState {
@@ -118,12 +121,12 @@ private struct ConnectionSettings: View {
                 Text("Only the selected account syncs and shows notifications. Each account keeps a separate archive on this Mac.").font(.caption).foregroundStyle(.secondary)
             }
         }.formStyle(.grouped).frame(height: 360)
-        .sheet(isPresented: $showingReconnect) { RelinkView(controller: model.relinking).environmentObject(model) }
+        .sheet(isPresented: $showingReconnect) { RelinkView(controller: model.relinking).environment(model) }
     }
 }
 
 private struct HistorySettings: View {
-    @EnvironmentObject private var model: ArchiveModel
+    @Environment(ArchiveModel.self) private var model
     @State private var draft = ArchiveSettings.initial
     @State private var cleanupCount: Int?
     private var cleanupEnabled: Binding<Bool> { Binding(get: { draft.retentionDays > 0 }, set: { draft.retentionDays = $0 ? 365 : 0 }) }

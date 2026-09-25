@@ -3,10 +3,11 @@ import SwiftUI
 import QuickLook
 
 struct ArchiveRootView: View {
-    @EnvironmentObject private var model: ArchiveModel
+    @Environment(ArchiveModel.self) private var model
     @AppStorage("appearance") private var appearance = "system"
 
     var body: some View {
+        @Bindable var bindable = model
         NavigationSplitView {
             ArchiveSidebar()
                 .navigationSplitViewColumnWidth(min: 250, ideal: 300, max: 400)
@@ -32,10 +33,10 @@ struct ArchiveRootView: View {
             model.windowIsKey = key
             if key { model.windowBecameKey() }
         })
-        .quickLookPreview($model.previewURL)
+        .quickLookPreview($bindable.previewURL)
         .preferredColorScheme(appearance == "dark" ? .dark : appearance == "light" ? .light : nil)
-        .sheet(isPresented: $model.showingAccounts) { AccountsView(pairing: model.addingAccount).environmentObject(model) }
-        .sheet(isPresented: $model.showingNewMessage) { NewMessageView().environmentObject(model) }
+        .sheet(isPresented: $bindable.showingAccounts) { AccountsView(pairing: model.addingAccount).environment(model) }
+        .sheet(isPresented: $bindable.showingNewMessage) { NewMessageView().environment(model) }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             Task { await model.notifications.refreshSettings() }
             model.sendPresence()
@@ -47,7 +48,7 @@ struct ArchiveRootView: View {
 }
 
 private struct ErrorBanner: View {
-    @EnvironmentObject private var model: ArchiveModel
+    @Environment(ArchiveModel.self) private var model
     let text: String
     var body: some View {
         HStack(spacing: 10) {
@@ -63,7 +64,7 @@ private struct ErrorBanner: View {
 }
 
 private struct ArchiveWelcome: View {
-    @EnvironmentObject private var model: ArchiveModel
+    @Environment(ArchiveModel.self) private var model
     var body: some View {
         VStack(spacing: 14) {
             Image(systemName: "bubble.left.and.text.bubble.right.fill")

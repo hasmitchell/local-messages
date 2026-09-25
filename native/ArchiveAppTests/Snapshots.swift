@@ -1,5 +1,6 @@
 #if UI_SNAPSHOTS
 import AppKit
+import SQLite3
 import SwiftUI
 
 // Review-only helper: renders the app's own windows to PNG files so UI changes
@@ -30,12 +31,81 @@ enum SnapshotRunner {
                 window.makeKeyAndOrderFront(nil)
             }
             try? await Task.sleep(for: .milliseconds(400))
+            if scenario == "performance" || scenario == "composer-checks" || scenario == "send-animation" {
+                try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                if scenario == "performance" { await ResponsivenessRunner.run(model: model, output: directory) }
+                else if scenario == "send-animation" { await SendAnimationRunner.run(model: model, output: directory) }
+                else { await ResponsivenessRunner.validate(model: model, output: directory) }
+                exit(0)
+            }
+            if scenario == "idle" {
+                let seconds = Int(value("--seconds") ?? "") ?? 5
+                if let id = value("--conversation") { model.select(id); while model.loadingMessages { try? await Task.sleep(for: .milliseconds(20)) } }
+                for _ in 0..<(Int(value("--earlier") ?? "") ?? 0) where model.hasEarlier {
+                    model.loadMore(earlier: true)
+                    while model.paging { try? await Task.sleep(for: .milliseconds(20)) }
+                }
+                try? await Task.sleep(for: .seconds(2))
+                // The connected worker repeats its status every two seconds.
+                if let count = Int(value("--arrival-cost") ?? ""), let conversation = model.selectedID,
+                   ["review-fixture", "livecopy"].contains(model.directory?.lastPathComponent ?? "") {
+                    // Writes to a disposable copy only, never a real archive.
+                    var db: OpaquePointer?
+                    sqlite3_open_v2(model.directory!.appendingPathComponent("archive.db").path, &db, SQLITE_OPEN_READWRITE, nil)
+                    let arrivals = await ResponsivenessRunner.changeCost(count: count, settle: 1800) { index in
+                        let id = "perf-arrival-\(index)-\(UUID().uuidString)"
+                        let stamp = Int64(Date().timeIntervalSince1970 * 1_000_000)
+                        let payload = #"{"id":"\#(id)","conversation_id":"\#(conversation)","body":"Timing check \#(index)","sender":"Test","outgoing":false,"transport":"RCS","status":"INCOMING_COMPLETE"}"#
+                        sqlite3_exec(db, "INSERT INTO messages VALUES('\(id)','\(conversation)',\(stamp),'Timing check','Test','\(payload)'); UPDATE conversations SET last_message=\(stamp) WHERE id='\(conversation)'", nil, nil, nil)
+                    }
+                    sqlite3_close(db)
+                    try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                    let metrics: [String: Any] = ["arrival_cpu_ms": arrivals.medianMS, "arrival_redraws": arrivals.renders, "messages": model.messages.count]
+                    try? JSONSerialization.data(withJSONObject: metrics, options: [.prettyPrinted, .sortedKeys]).write(to: directory.appendingPathComponent("idle.json"))
+                    exit(0)
+                }
+                if let ids = value("--switch-between")?.split(separator: ",").map(String.init) {
+                    var stalls: [Double] = [], ready: [Double] = []
+                    for index in 0..<(Int(value("--switches") ?? "") ?? 10) {
+                        try? await Task.sleep(for: .milliseconds(500))
+                        let start = Date()
+                        stalls.append(await ResponsivenessRunner.longestStall {
+                            model.select(ids[index % ids.count])
+                            while model.loadingMessages { try? await Task.sleep(for: .milliseconds(2)) }
+                            ready.append(Date().timeIntervalSince(start) * 1000)
+                            try? await Task.sleep(for: .milliseconds(300))
+                        })
+                    }
+                    try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                    let metrics: [String: Any] = ["switch_stall_ms_median": stalls.sorted()[stalls.count / 2], "switch_stall_ms_max": stalls.max() ?? 0, "switch_loaded_ms_median": ready.sorted()[ready.count / 2]]
+                    try? JSONSerialization.data(withJSONObject: metrics, options: [.prettyPrinted, .sortedKeys]).write(to: directory.appendingPathComponent("idle.json"))
+                    exit(0)
+                }
+                if let count = Int(value("--publish-cost") ?? "") {
+                    let status = await ResponsivenessRunner.changeCost(count: count) { model.syncStateChanged($0 % 2 == 0 ? .photosPending : .connected) }
+                    let typing = await ResponsivenessRunner.changeCost(count: count) { model.typingChanged(digest: "elsewhere", active: $0 % 2 == 0) }
+                    let highlight = await ResponsivenessRunner.changeCost(count: count) { model.highlightedID = $0 % 2 == 0 ? model.messages.first?.id : nil }
+                    try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                    let metrics: [String: Any] = ["status_cpu_ms": status.medianMS, "status_redraws": status.renders, "typing_elsewhere_cpu_ms": typing.medianMS, "typing_elsewhere_redraws": typing.renders,
+                                                  "highlight_cpu_ms": highlight.medianMS, "highlight_redraws": highlight.renders, "messages": model.messages.count, "conversation": model.selectedID ?? ""]
+                    try? JSONSerialization.data(withJSONObject: metrics, options: [.prettyPrinted, .sortedKeys]).write(to: directory.appendingPathComponent("idle.json"))
+                    exit(0)
+                }
+                if arguments.contains("--status-pulse") {
+                    Task { while true { model.syncStateChanged(.connected); try? await Task.sleep(for: .seconds(2)) } }
+                }
+                let result = await ResponsivenessRunner.idle(model: model, seconds: seconds)
+                try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                let metrics: [String: Any] = ["idle_cpu_percent": result.cpuPercent, "idle_redraws": result.renders, "seconds": seconds]
+                try? JSONSerialization.data(withJSONObject: metrics, options: [.prettyPrinted, .sortedKeys]).write(to: directory.appendingPathComponent("idle.json"))
+                exit(0)
+            }
             apply(scenario, to: model)
             try? await Task.sleep(for: .seconds(2))
             try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             if arguments.contains("--dump"), let content = NSApp.windows.first(where: { $0.isVisible })?.contentView {
                 var lines: [String] = []
-                func walk(_ view: NSView, _ depth: Int) {
+                @MainActor func walk(_ view: NSView, _ depth: Int) {
                     lines.append(String(repeating: "  ", count: depth) + "\(type(of: view)) \(view.frame.integral) hidden=\(view.isHidden)")
                     if depth < 14 { for child in view.subviews { walk(child, depth + 1) } }
                 }
@@ -76,7 +146,7 @@ enum SnapshotRunner {
             if let conversation = model.selectedConversation {
                 let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 320, height: 760), styleMask: [.titled], backing: .buffered, defer: false)
                 window.title = "Inspector"
-                window.contentView = NSHostingView(rootView: ConversationInfo(conversation: conversation).environmentObject(model))
+                window.contentView = NSHostingView(rootView: ConversationInfo(conversation: conversation).environment(model))
                 window.orderFront(nil)
                 extraWindows.append(window)
             }
@@ -84,7 +154,7 @@ enum SnapshotRunner {
         }
     }
 
-    private static func render(_ window: NSWindow) -> NSBitmapImageRep? {
+    static func render(_ window: NSWindow) -> NSBitmapImageRep? {
         guard let content = window.contentView, let frame = content.superview, let layer = frame.layer else { return nil }
         let scale = window.backingScaleFactor
         let size = frame.bounds.size

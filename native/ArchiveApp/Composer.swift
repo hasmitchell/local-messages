@@ -3,18 +3,26 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct MessageComposer: View {
-    @EnvironmentObject private var model: ArchiveModel
+    @Environment(ArchiveModel.self) private var model
+    var body: some View { ComposerContent() }
+}
+
+private struct ComposerContent: View {
+    @Environment(ArchiveModel.self) private var model
+    @StateObject private var editorActions = ComposerEditorActions()
     @State private var focused = false
     @State private var choosingFiles = false
     @State private var editorHeight: CGFloat = 20
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AppStorage("spellCheck") private var spellCheck = true
     @AppStorage("autocorrect") private var autocorrect = false
+    @AppStorage("emojiShortcuts") private var emojiShortcuts = true
 
     private struct Note { let text: String; let symbol: String; let warning: Bool }
     private var note: Note? {
         if let error = model.composerError { return Note(text: error, symbol: "exclamationmark.circle.fill", warning: true) }
         if model.stagingAttachments { return Note(text: "Preparing attachments…", symbol: "clock", warning: false) }
-        if model.draft.submissionID != nil { return Note(text: "Checking send status. Your text is saved.", symbol: "clock", warning: false) }
+        if model.draft.submissionID != nil && !model.draftIsInTimeline { return Note(text: "Checking send status. Your text is saved.", symbol: "clock", warning: false) }
         if !model.canSync { return Note(text: "Read-only archive. Drafts are saved on this Mac but cannot be sent from here.", symbol: "lock", warning: false) }
         if model.draft.body.unicodeScalars.count > 4000 || model.draft.body.utf8.count > 16000 { return Note(text: "Messages can be up to 4,000 characters.", symbol: "exclamationmark.circle.fill", warning: true) }
         if !model.syncEnabled || !model.syncState.canSend { return Note(text: "Not connected to your phone. Drafts are saved and can be sent once sync reconnects.", symbol: "iphone.slash", warning: false) }
@@ -22,9 +30,12 @@ struct MessageComposer: View {
     }
 
     var body: some View {
+        #if UI_SNAPSHOTS
+        let _ = RenderCount.bump("composer")
+        #endif
         VStack(alignment: .leading, spacing: 6) {
-            if model.draft.replyTo != nil { ReplyStrip().transition(.move(edge: .bottom).combined(with: .opacity)) }
-            if !model.draft.attachments.isEmpty { AttachmentStrip().transition(.move(edge: .bottom).combined(with: .opacity)) }
+            if model.draft.replyTo != nil && !model.draftIsInTimeline { ReplyStrip().transition(.opacity) }
+            if !model.draft.attachments.isEmpty && !model.draftIsInTimeline { AttachmentStrip().transition(.opacity) }
             HStack(alignment: .bottom, spacing: 4) {
                 Button { choosingFiles = true } label: {
                     Image(systemName: "paperclip").font(.system(size: 15, weight: .medium)).frame(width: 28, height: 28).contentShape(Rectangle())
@@ -33,13 +44,19 @@ struct MessageComposer: View {
                 .disabled(model.draft.submissionID != nil || model.stagingAttachments)
                 .help("Attach photos or files").accessibilityLabel("Attach files")
                 editor
+                Button(action: editorActions.showEmojiPicker) {
+                    Image(systemName: "face.smiling").font(.system(size: 15)).frame(width: 28, height: 28).contentShape(Rectangle())
+                }
+                .buttonStyle(.bouncy).foregroundStyle(.secondary)
+                .disabled(model.draft.submissionID != nil)
+                .help("Emoji & Symbols (⌃⌘Space)").accessibilityLabel("Insert emoji")
                 Button(action: model.sendDraft) {
                     Image(systemName: "arrow.up.circle.fill").font(.system(size: 24)).frame(width: 28, height: 28)
+                        .symbolEffect(.bounce, options: .nonRepeating, value: reduceMotion ? nil : model.sendPulse)
                 }
                 .buttonStyle(.bouncy).foregroundStyle(model.canSendDraft ? archiveAccent : Color.secondary.opacity(0.45))
-                .scaleEffect(model.canSendDraft ? 1 : 0.9)
-                .animation(Motion.bouncy, value: model.canSendDraft)
-                .disabled(!model.canSendDraft).accessibilityLabel("Send message").help("Send (⌘Return). Return adds a new line.")
+                .animation(.easeOut(duration: 0.15), value: model.canSendDraft)
+                .disabled(!model.canSendDraft).accessibilityLabel("Send message").help("Send (Return). Shift-Return adds a new line.")
                 .keyboardShortcut(.return, modifiers: .command)
             }
             .padding(.leading, 4).padding(.trailing, 4).padding(.vertical, 3)
@@ -59,15 +76,18 @@ struct MessageComposer: View {
         .animation(Motion.quick, value: model.draft.replyTo)
         .animation(Motion.quick, value: model.draft.attachments.count)
         .animation(Motion.quick, value: model.composerError)
+        .onChange(of: model.sendPulse) { editorHeight = 22 }
         .fileImporter(isPresented: $choosingFiles, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
             if case .success(let urls) = result { model.attach(urls) }
         }
     }
 
     private var editor: some View {
-        ComposerTextView(text: Binding(get: { model.draft.body }, set: { model.editDraft($0) }),
+        ComposerTextView(text: Binding(get: { model.draftIsInTimeline ? "" : model.draft.body }, set: { model.editDraft($0) }),
                          isEditable: model.draft.submissionID == nil, spellCheck: spellCheck, autocorrect: autocorrect,
+                         emojiShortcuts: emojiShortcuts, contextID: (model.directory?.path ?? "") + "/" + (model.selectedID ?? ""), actions: editorActions,
                          placeholder: "Message",
+                         onSubmit: { model.sendDraft() },
                          onHeightChange: { editorHeight = $0 },
                          onFocusChange: { focused = $0 },
                          onAttachFiles: { model.attach($0) },
@@ -80,7 +100,7 @@ struct MessageComposer: View {
 
 // What the draft will quote, with a way to drop it.
 private struct ReplyStrip: View {
-    @EnvironmentObject private var model: ArchiveModel
+    @Environment(ArchiveModel.self) private var model
     var body: some View {
         HStack(spacing: 8) {
             RoundedRectangle(cornerRadius: 1.5).fill(archiveAccent).frame(width: 3, height: 28)
@@ -98,7 +118,7 @@ private struct ReplyStrip: View {
 }
 
 private struct AttachmentStrip: View {
-    @EnvironmentObject private var model: ArchiveModel
+    @Environment(ArchiveModel.self) private var model
     private func stagedURL(_ file: DraftAttachment) -> URL? {
         // Staged copies live under the archive's private drafts folder; ids are UUIDs.
         guard let directory = model.directory, file.id.count == 36, file.id.allSatisfy({ $0.isHexDigit || $0 == "-" }) else { return nil }
