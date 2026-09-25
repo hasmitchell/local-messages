@@ -176,9 +176,11 @@ private struct MessageTimeline: View {
                 let context = BubbleContext(model: model, conversation: conversation)
                 let contentWidth = min(1100, geometry.size.width) - 36
                 let bubbleWidth = min(540, max(240, contentWidth * 0.72))
-                // Only visible rows are built; image sizes are known ahead of
-                // layout (ImageSizeCache), so row heights do not jump.
-                LazyVStack(spacing: 0) {
+                // Message pages are fetched after the selection reaches the UI.
+                // Eager layout keeps scroll anchors exact for variable-height media.
+                // A LazyVStack was tried (0.8.7): estimated row heights made
+                // scrollTo overshoot and bounce, and could land above all rows.
+                VStack(spacing: 0) {
                     if model.hasEarlier {
                         LoadMoreButton(title: "Show Earlier Messages") { model.loadMore(earlier: true) }.disabled(model.paging).padding(.bottom, 6)
                     }
@@ -225,16 +227,7 @@ private struct MessageTimeline: View {
                     if request.animated { try? await Task.sleep(for: .milliseconds(16)) }
                     else { await Task.yield() }
                     guard model.scrollRequest == request else { return }
-                    let manual = model.manualScrolls
                     withAnimation(request.animated && !reduceMotion ? Motion.send : nil) {
-                        reader.scrollTo(request.atBottom ? "timeline-bottom" : request.messageID, anchor: request.atBottom ? .bottom : .center)
-                    }
-                    // Rows are built lazily, so the first scroll can land on
-                    // estimated heights. Settle once they are real, unless the
-                    // user has taken over; at the target this changes nothing.
-                    for delay in request.animated ? [500] : [60, 250] {
-                        try? await Task.sleep(for: .milliseconds(delay))
-                        guard model.scrollRequest == request, model.manualScrolls == manual else { return }
                         reader.scrollTo(request.atBottom ? "timeline-bottom" : request.messageID, anchor: request.atBottom ? .bottom : .center)
                     }
                 }

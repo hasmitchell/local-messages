@@ -81,6 +81,39 @@ import SwiftUI
         }
         return (costs.sorted()[costs.count / 2], renders.mapValues { $0 / count })
     }
+    /// The message timeline's AppKit scroll view: the tallest document that is
+    /// neither the sidebar list nor the composer.
+    static func timelineScrollView() -> NSScrollView? {
+        func all(_ view: NSView) -> [NSScrollView] { (view as? NSScrollView).map { [$0] } ?? [] + view.subviews.flatMap(all) }
+        let views = NSApp.windows.filter(\.isVisible).compactMap(\.contentView).flatMap(all)
+        return views.filter { !($0.documentView is NSTableView) && !($0.documentView is NSTextView) && !($0.documentView is NSOutlineView) }
+            .max { ($0.documentView?.frame.height ?? 0) < ($1.documentView?.frame.height ?? 0) }
+    }
+    struct Landing { let reversals: Int; let travel: Double; let fromBottom: Double }
+    /// Opens a conversation and follows the real scroll offset until it settles:
+    /// it should go straight to the bottom, without bouncing.
+    static func landing(model: ArchiveModel, conversation: String) async -> Landing {
+        model.select(conversation)
+        var offsets: [Double] = []
+        let start = Date()
+        while Date().timeIntervalSince(start) < 1.2 {
+            if !model.loadingMessages, let scroll = timelineScrollView() { offsets.append(scroll.contentView.bounds.origin.y) }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        var reversals = 0, travel = 0.0, direction = 0.0
+        for (previous, next) in zip(offsets, offsets.dropFirst()) where abs(next - previous) > 0.5 {
+            travel += abs(next - previous)
+            let step = next > previous ? 1.0 : -1.0
+            if direction != 0 && step != direction { reversals += 1 }
+            direction = step
+        }
+        var fromBottom = 9999.0
+        if let scroll = timelineScrollView(), let document = scroll.documentView {
+            let visible = scroll.contentView.bounds
+            fromBottom = document.isFlipped ? document.frame.height - visible.maxY : visible.minY
+        }
+        return Landing(reversals: reversals, travel: travel, fromBottom: fromBottom)
+    }
     /// The longest the main thread went without running a 4 ms timer while
     /// `work` ran: roughly the worst dropped-frame hitch a user would see.
     static func longestStall(_ work: () async -> Void) async -> Double {
@@ -132,6 +165,13 @@ import SwiftUI
             try await Task.sleep(for: .milliseconds(400))
             try check(model.timelineAtBottom, "switched conversation did not settle at the bottom")
             report["latest_at_bottom"] = model.timelineAtBottom
+            // Opening a conversation goes straight to its newest message: no
+            // bounce through estimated heights, and never left above the rows.
+            for id in ["maya", "alex", "dad", "alex"] {
+                let landing = await landing(model: model, conversation: id)
+                try check(landing.reversals == 0 && landing.fromBottom <= 2, "opening \(id) bounced or missed the bottom: \(landing)")
+            }
+            report["opens_at_bottom_without_bounce"] = true
 
             guard let input else { throw Failure(message: "composer not found") }
             input.window?.makeFirstResponder(input)

@@ -64,6 +64,19 @@ enum SnapshotRunner {
                     try? JSONSerialization.data(withJSONObject: metrics, options: [.prettyPrinted, .sortedKeys]).write(to: directory.appendingPathComponent("idle.json"))
                     exit(0)
                 }
+                if let ids = value("--landing")?.split(separator: ",").map(String.init) {
+                    var results: [[String: Any]] = []
+                    for round in 0..<2 {
+                        for id in ids {
+                            try? await Task.sleep(for: .milliseconds(300))
+                            let landing = await ResponsivenessRunner.landing(model: model, conversation: id)
+                            results.append(["conversation": id, "round": round, "reversals": landing.reversals, "travel": Int(landing.travel), "from_bottom": Int(landing.fromBottom)])
+                        }
+                    }
+                    try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                    try? JSONSerialization.data(withJSONObject: ["landings": results], options: [.prettyPrinted, .sortedKeys]).write(to: directory.appendingPathComponent("idle.json"))
+                    exit(0)
+                }
                 if let ids = value("--switch-between")?.split(separator: ",").map(String.init) {
                     var stalls: [Double] = [], ready: [Double] = []
                     for index in 0..<(Int(value("--switches") ?? "") ?? 10) {

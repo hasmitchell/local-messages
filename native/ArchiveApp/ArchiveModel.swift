@@ -151,9 +151,7 @@ final class ArchiveModel {
     private(set) var sendPulse = UUID()
     private var followingSubmission: String?
     var followingOwnSend: Bool { followingSubmission != nil }
-    /// Counts wheel and trackpad scrolls; untracked, since no view draws it.
-    @ObservationIgnored private(set) var manualScrolls = 0
-    func userScrolledTimeline() { followingSubmission = nil; manualScrolls += 1 }
+    func userScrolledTimeline() { followingSubmission = nil }
     #if UI_SNAPSHOTS
     @ObservationIgnored var simulatedSend: ((SendCommand) throws -> Void)?
     #endif
