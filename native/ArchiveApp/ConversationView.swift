@@ -291,13 +291,27 @@ private struct TimelineRows: View, Equatable {
     /// whose height at this width is not known yet. The rest become spacers of
     /// exactly their measured height, so scroll positions stay exact.
     private func fullRows() -> Set<String>? {
-        guard let window, heights.width == bubbleWidth else { return nil }
+        guard let window, heights.width == bubbleWidth else {
+            #if UI_SNAPSHOTS
+            RenderCount.lastLayout = (window, heights.top, [])
+            #endif
+            return nil
+        }
         var full = Set<String>(), y = heights.top, known = true
+        #if UI_SNAPSHOTS
+        var placed: [(id: String, top: CGFloat, bottom: CGFloat, full: Bool)] = []
+        #endif
         for entry in entries {
             guard known, let height = heights.height(entry.id, key: entry.hashValue) else { known = false; full.insert(entry.id); continue }
             if y + height >= window.lowerBound && y <= window.upperBound { full.insert(entry.id) }
+            #if UI_SNAPSHOTS
+            placed.append((entry.id, y, y + height, full.contains(entry.id)))
+            #endif
             y += height
         }
+        #if UI_SNAPSHOTS
+        RenderCount.lastLayout = (window, heights.top, placed)
+        #endif
         return full
     }
     var body: some View {
@@ -305,14 +319,22 @@ private struct TimelineRows: View, Equatable {
         let _ = RenderCount.bump("rows")
         #endif
         let full = fullRows()
-        ForEach(entries) { entry in
-            if let full, !full.contains(entry.id), let height = heights.height(entry.id, key: entry.hashValue) {
-                Color.clear.frame(height: height).id(entry.scrollID)
-            } else {
-                row(entry)
-                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
-                        if heights.record(entry.id, key: entry.hashValue, height: height, width: bubbleWidth) { rowsMeasured() }
-                    }
+        // An explicit stack: a bare ForEach behind .equatable() is laid out in
+        // an implicit stack with the default 8 pt spacing, which loosened the
+        // grouping and put every spacer 8 pt per row out of place.
+        VStack(spacing: 0) {
+            ForEach(entries) { entry in
+                if let full, !full.contains(entry.id), let height = heights.height(entry.id, key: entry.hashValue) {
+                    Color.clear.frame(height: height).id(entry.scrollID)
+                } else {
+                    row(entry)
+                        .onGeometryChange(for: CGRect.self) { $0.frame(in: .named("timelineContent")) } action: { frame in
+                            #if UI_SNAPSHOTS
+                            RenderCount.actualRows[entry.id] = (frame.minY, frame.height)
+                            #endif
+                            if heights.record(entry.id, key: entry.hashValue, height: frame.height, width: bubbleWidth) { rowsMeasured() }
+                        }
+                }
             }
         }
     }
@@ -580,6 +602,8 @@ private struct MessageBubble: View {
         rowContent
         .padding(.top, first ? 8 : 2)
         .padding(.bottom, message.reactions.isEmpty ? 0 : 12)
+        // The row grows to make room for reaction badges in the same motion as the badges appear.
+        .animation(Motion.bouncy, value: message.reactions)
         // The whole row, including the empty space beside the bubble, keeps the
         // hover controls visible while the pointer travels to them.
         .contentShape(Rectangle())

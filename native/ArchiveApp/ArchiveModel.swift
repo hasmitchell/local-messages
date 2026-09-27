@@ -561,14 +561,17 @@ final class ArchiveModel {
             let oldIDs = Set(messages.map { messageSubmissions[$0.id].map { "outbox-" + $0 } ?? $0.id } + displayedOutbox.filter { !$0.isReaction }.map { "outbox-" + $0.id })
             let newIDs = Set(window.messages.map { window.submissions[$0.id].map { "outbox-" + $0 } ?? $0.id } + pending.filter { !$0.isReaction }.map { "outbox-" + $0.id })
             let inserted = !newIDs.subtracting(oldIDs).isEmpty
-            // Confirmation keeps the existing row in place. Only new content
-            // asks for an animated scroll; status changes never replay the send.
+            // Confirmation keeps the existing row in place; a new row's entrance
+            // is the bubble's own (SendBubbleEntrance), not a replayed send.
             var transaction = Transaction(animation: nil)
             transaction.disablesAnimations = true
             withTransaction(transaction) { apply(window); applyOutbox(pending) }
             if let followingSubmission, window.submissions.values.contains(followingSubmission) { self.followingSubmission = nil }
             if shouldFollow && contentChanged {
-                scrollRequest = ScrollRequest(messageID: "timeline-bottom", atBottom: true, animated: inserted)
+                // Animated even when nothing was inserted: a reaction badge or a
+                // status line grows the content, and the bottom eases into view.
+                _ = inserted
+                scrollRequest = ScrollRequest(messageID: "timeline-bottom", atBottom: true, animated: true)
                 if windowIsKey && NSApp.isActive { markVisibleAsSeen() }
             }
         }

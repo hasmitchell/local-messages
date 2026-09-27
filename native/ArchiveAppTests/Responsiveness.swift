@@ -7,6 +7,11 @@ import SwiftUI
 /// changes (typing, sync status) leave them alone.
 @MainActor enum RenderCount {
     static var counts: [String: Int] = [:]
+    /// The last spacer decision: the range rows are drawn in, the first row's
+    /// top, and each measured row's extent with whether it was drawn in full.
+    static var lastLayout: (window: ClosedRange<CGFloat>?, top: CGFloat, rows: [(id: String, top: CGFloat, bottom: CGFloat, full: Bool)]) = (nil, 0, [])
+    /// Each drawn row's real top and height in the timeline content, from layout.
+    static var actualRows: [String: (top: CGFloat, height: CGFloat)] = [:]
     /// Renders every bubble as if hovered, to check the controls' placement.
     static var forceHover = false
     /// Experiment switches from the command line: `--name value` or `--name`.
@@ -232,6 +237,27 @@ import SwiftUI
                 try check(landing.reversals == 0 && landing.fromBottom <= 2, "opening \(id) bounced or missed the bottom: \(landing)")
             }
             report["opens_at_bottom_without_bounce"] = true
+            // Off-screen spacers must sit exactly where the rows they replace would be,
+            // and never cover the visible area, here and after scrolling up a screen.
+            for id in ["maya", "alex"] {
+                model.select(id, force: true)
+                try await loaded(model)
+                try await Task.sleep(for: .milliseconds(700))
+                for scrolled in [false, true] {
+                    if scrolled, let scroll = timelineScrollView() {
+                        scroll.contentView.scroll(to: NSPoint(x: 0, y: max(0, scroll.contentView.bounds.origin.y - 500))); scroll.reflectScrolledClipView(scroll.contentView)
+                        try await Task.sleep(for: .milliseconds(700))
+                    }
+                    guard let scroll = timelineScrollView(), let document = scroll.documentView else { throw Failure(message: "no timeline") }
+                    let visible = scroll.documentVisibleRect
+                    let layout = RenderCount.lastLayout
+                    let blank = layout.rows.filter { !$0.full && $0.bottom > visible.minY && $0.top < visible.maxY }
+                    try check(blank.isEmpty, "\(id)\(scrolled ? " scrolled" : ""): \(blank.count) blank spacers inside the visible area, e.g. \(blank.first.map { "\(Int($0.top))...\(Int($0.bottom))" } ?? "")")
+                    for row in layout.rows { if let actual = RenderCount.actualRows[row.id] { try check(abs(actual.top - row.top) < 1, "\(id): row \(row.id) computed at \(Int(row.top)) but laid out at \(Int(actual.top))") } }
+                    if let last = layout.rows.last { try check(abs(last.bottom - document.frame.height) < 40, "\(id): rows end at \(Int(last.bottom)) in a \(Int(document.frame.height)) pt document") }
+                }
+            }
+            report["spacers_exact"] = true
 
             guard let input else { throw Failure(message: "composer not found") }
             input.window?.makeFirstResponder(input)

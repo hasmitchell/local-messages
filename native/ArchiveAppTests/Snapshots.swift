@@ -139,6 +139,37 @@ enum SnapshotRunner {
                     try? lines.joined(separator: "\n").write(to: directory.appendingPathComponent("toolbar-trace.txt"), atomically: true, encoding: .utf8)
                     exit(0)
                 }
+                if let ids = value("--gap-check")?.split(separator: ",").map(String.init) {
+                    // Opens conversations in turn and reports any spacer that overlaps the visible area.
+                    try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                    var report: [String] = []
+                    for (index, id) in ids.enumerated() {
+                        model.select(id, force: true)
+                        while model.loadingMessages { try? await Task.sleep(for: .milliseconds(20)) }
+                        try? await Task.sleep(for: .milliseconds(900))
+                        guard let scroll = ResponsivenessRunner.timelineScrollView(), let document = scroll.documentView else { report.append("\(id): no scroll view"); continue }
+                        let visible = scroll.documentVisibleRect
+                        let (top, bottom) = document.isFlipped ? (visible.minY, visible.maxY) : (document.frame.height - visible.maxY, document.frame.height - visible.minY)
+                        let layout = RenderCount.lastLayout
+                        let blank = layout.rows.filter { !$0.full && $0.bottom > top && $0.top < bottom }
+                        let drawn = layout.rows.filter(\.full).count
+                        let computedBottom = layout.rows.last.map { Int($0.bottom) } ?? -1
+                        var drift: [String] = []
+                        for row in layout.rows.prefix(60) {
+                            guard let actual = RenderCount.actualRows[row.id] else { continue }
+                            let heightGap = actual.height - (row.bottom - row.top), topGap = actual.top - row.top
+                            if abs(heightGap) > 0.5 || abs(topGap) > 0.5 { drift.append("\(row.id.prefix(10)) computed top \(Int(row.top)) h \(Int(row.bottom - row.top)) actual top \(Int(actual.top)) h \(Int(actual.height))") }
+                        }
+                        report.append("  drift (first rows): " + (drift.isEmpty ? "none in first 60" : drift.prefix(6).joined(separator: " | ")))
+                        let tallest = layout.rows.max { $0.bottom - $0.top < $1.bottom - $1.top }.map { "\($0.id.prefix(12)) \(Int($0.bottom - $0.top))pt" } ?? "-"
+                        report.append("\(id): computed rows end \(computedBottom) vs document \(Int(document.frame.height)) flipped \(document.isFlipped) contentH \(Int(scroll.contentView.documentRect.height)) tallest \(tallest); visible \(Int(top))...\(Int(bottom)) of \(Int(document.frame.height)), window \(layout.window.map { "\(Int($0.lowerBound))...\(Int($0.upperBound))" } ?? "nil"), rows \(layout.rows.count) (\(drawn) drawn), first-row top \(Int(layout.top)), blank-in-view \(blank.count)" + (blank.isEmpty ? "" : " e.g. \(Int(blank[0].top))...\(Int(blank[0].bottom))"))
+                        if let window = NSApp.windows.first(where: { $0.isVisible }), let rep = render(window), let data = rep.representation(using: .png, properties: [:]) {
+                            try? data.write(to: directory.appendingPathComponent("gap-\(index)-\(id).png"))
+                        }
+                    }
+                    try? report.joined(separator: "\n").write(to: directory.appendingPathComponent("gap-check.txt"), atomically: true, encoding: .utf8)
+                    exit(0)
+                }
                 if arguments.contains("--toolbar-shots") {
                     try? await Task.sleep(for: .seconds(1))
                     try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
