@@ -178,20 +178,12 @@ private struct SearchResultsList: View {
         List(selection: Binding<String?>(get: { model.highlightedID }, set: { id in
             if let result = model.searchResults.first(where: { $0.id == id }) { model.select(result.conversationID, messageID: result.id) }
         })) {
-            if !model.titleMatches.isEmpty {
-                Section("Conversations") {
-                    ForEach(model.titleMatches.prefix(8)) { conversation in
-                        Button { model.select(conversation.id) } label: {
-                            HStack(spacing: 10) {
-                                Avatar(name: conversation.title, size: 28, group: conversation.isGroup, imageURL: model.avatarURL(conversation))
-                                VStack(alignment: .leading, spacing: 1) {
-                                    Text(conversation.title).font(.system(size: 13, weight: .medium)).lineLimit(1)
-                                    if !conversation.numbers.isEmpty { Text(verbatim: conversation.numbers).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1) }
-                                }
-                            }.padding(.vertical, 3).frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
-                        }.buttonStyle(.plain)
-                    }
-                }
+            let matches = model.titleMatchSections
+            if !matches.people.isEmpty {
+                Section("Conversations") { ForEach(matches.people.prefix(8)) { TitleMatchRow(conversation: $0) } }
+            }
+            if !matches.groups.isEmpty {
+                Section("Groups") { ForEach(matches.groups.prefix(5)) { TitleMatchRow(conversation: $0) } }
             }
             Section(model.searching ? "Searching…" : model.searchTotal == 1 ? "1 message" : "\(model.searchTotal.formatted()) messages") {
                 if let error = model.searchError { Text(error).font(.callout).foregroundStyle(.secondary) }
@@ -218,6 +210,22 @@ private struct SearchResultsList: View {
                 ContentUnavailableView.search(text: model.query).scaleEffect(0.8)
             }
         }
+    }
+}
+
+private struct TitleMatchRow: View {
+    @Environment(ArchiveModel.self) private var model
+    let conversation: ConversationRecord
+    var body: some View {
+        Button { model.select(conversation.id) } label: {
+            HStack(spacing: 10) {
+                Avatar(name: conversation.title, size: 28, group: conversation.isGroup, imageURL: model.avatarURL(conversation))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(conversation.title).font(.system(size: 13, weight: .medium)).lineLimit(1)
+                    if !conversation.numbers.isEmpty { Text(verbatim: conversation.numbers).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1) }
+                }
+            }.padding(.vertical, 3).frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+        }.buttonStyle(.plain)
     }
 }
 

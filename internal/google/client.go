@@ -254,24 +254,44 @@ func (c *Client) Contacts(ctx context.Context) ([]archive.Contact, error) {
 func ConvertConversation(raw *gmproto.Conversation, folder string) archive.Conversation {
 	name := raw.GetName()
 	if name == "" {
-		for _, person := range raw.GetParticipants() {
-			if !person.GetIsMe() {
-				if name != "" {
-					name += ", "
-				}
-				label := person.GetFullName()
-				if label == "" {
-					label = person.GetID().GetNumber()
-				}
-				name += label
-			}
-		}
+		name = participantNames(raw.GetParticipants())
 	}
 	var participants []archive.Participant
 	for _, p := range raw.GetParticipants() {
 		participants = append(participants, archive.Participant{ID: p.GetID().GetParticipantID(), Name: p.GetFullName(), Number: p.GetID().GetNumber(), IsMe: p.GetIsMe(), ContactID: p.GetContactID()})
 	}
 	return archive.Conversation{ID: raw.GetConversationID(), Name: name, Folder: folder, LastMessage: time.UnixMicro(raw.GetLastMessageTimestamp()).UTC(), Unread: raw.GetUnread(), Participants: participants}
+}
+
+// participantNames labels an unnamed conversation. The phone often lists the
+// account's own number again as an ordinary participant (its profile entry);
+// those copies are not other people, unless they are all there is (note to self).
+func participantNames(people []*gmproto.Participant) string {
+	own := map[string]bool{}
+	for _, person := range people {
+		if person.GetIsMe() && person.GetID().GetNumber() != "" {
+			own[person.GetID().GetNumber()] = true
+		}
+	}
+	var labels, self []string
+	for _, person := range people {
+		if person.GetIsMe() {
+			continue
+		}
+		label := person.GetFullName()
+		if label == "" {
+			label = person.GetID().GetNumber()
+		}
+		if own[person.GetID().GetNumber()] {
+			self = append(self, label)
+		} else {
+			labels = append(labels, label)
+		}
+	}
+	if len(labels) == 0 && len(self) > 0 {
+		return self[0]
+	}
+	return strings.Join(labels, ", ")
 }
 
 // ParticipantThumbnails returns the phone's contact photo for each participant

@@ -374,6 +374,11 @@ final class ArchiveModel {
         guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
         return conversations.filter { $0.title.localizedStandardContains(query) || $0.numbers.localizedStandardContains(query) }
     }
+    /// Title matches split so one-to-one chats lead and groups follow, each still newest first.
+    var titleMatchSections: (people: [ConversationRecord], groups: [ConversationRecord]) {
+        let matches = titleMatches
+        return (matches.filter { !$0.isGroup }, matches.filter(\.isGroup))
+    }
     var isSearching: Bool { !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     func conversationTitle(_ id: String) -> String { conversations.first { $0.id == id }?.title ?? "Conversation" }
 

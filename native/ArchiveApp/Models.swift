@@ -9,9 +9,16 @@ struct ConversationRecord: Identifiable, Sendable, Hashable {
     let messageCount: Int
     var unread = false
     var participants: [ConversationParticipant] = []
-    var otherParticipants: [ConversationParticipant] { participants.filter { !$0.isMe } }
+    /// The phone often lists the account's own number again as an ordinary participant (its profile entry),
+    /// which made one-to-one chats look like groups; those copies count as the account. A note-to-self chat keeps one.
+    var otherParticipants: [ConversationParticipant] {
+        let own = Set(participants.filter(\.isMe).map(\.number).filter { !$0.isEmpty })
+        let others = participants.filter { !$0.isMe }
+        let people = others.filter { !own.contains($0.number) }
+        return people.isEmpty ? Array(others.prefix(1)) : people
+    }
     var numbers: String { otherParticipants.map(\.number).filter { !$0.isEmpty }.joined(separator: ", ") }
-    var ownParticipantIDs: Set<String> { Set(participants.filter(\.isMe).map(\.id)) }
+    var ownParticipantIDs: Set<String> { let others = Set(otherParticipants.map(\.id)); return Set(participants.map(\.id).filter { !others.contains($0) }) }
     var date: Date { Date(timeIntervalSince1970: Double(timestamp) / 1_000_000) }
     var title: String {
         if !name.isEmpty { return name }

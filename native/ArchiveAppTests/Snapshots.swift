@@ -345,6 +345,7 @@ enum SnapshotRunner {
     private static func apply(_ scenario: String, to model: ArchiveModel) {
         switch scenario {
         case "search": model.query = "booking"
+        case "search-people": model.query = "000 003"
         case "thread":
             model.showingThreadSearch = true
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { model.threadQuery = "booking" }

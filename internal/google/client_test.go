@@ -27,6 +27,21 @@ func TestProtocolConversionPreservesPartsReactionsAndMicroseconds(t *testing.T) 
 	}
 }
 
+func TestOwnNumberCopiesDoNotNameConversation(t *testing.T) {
+	person := func(id, name, number string, me bool) *gmproto.Participant {
+		return &gmproto.Participant{ID: &gmproto.SmallInfo{ParticipantID: id, Number: number}, FullName: name, IsMe: me}
+	}
+	me, profile := person("2", "Me", "+61400000009", true), person("1828", "Me", "+61400000009", false)
+	raw := &gmproto.Conversation{ConversationID: "c", Participants: []*gmproto.Participant{me, person("5", "Sam", "+61400000005", false), profile, profile}}
+	if got := ConvertConversation(raw, "INBOX"); got.Name != "Sam" || len(got.Participants) != 4 {
+		t.Fatalf("own-number copies named the conversation: %+v", got)
+	}
+	raw.Participants = []*gmproto.Participant{me, profile}
+	if got := ConvertConversation(raw, "INBOX"); got.Name != "Me" {
+		t.Fatalf("note to self lost its name: %+v", got)
+	}
+}
+
 func TestThumbnailIsNotPresentedAsOriginal(t *testing.T) {
 	raw := &gmproto.Message{MessageInfo: []*gmproto.MessageInfo{{Data: &gmproto.MessageInfo_MediaContent{MediaContent: &gmproto.MediaContent{ThumbnailMediaID: "thumb", ThumbnailDecryptionKey: []byte{1}, MimeType: "image/jpeg"}}}}}
 	m := Convert(raw)

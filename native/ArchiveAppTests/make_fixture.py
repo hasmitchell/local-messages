@@ -71,6 +71,10 @@ for n, (cid, name, folder) in enumerate(contacts):
     stamp = int((now - dt.timedelta(days=n)).timestamp() * 1e6)
     db.execute('INSERT INTO conversations VALUES(?,?,?,?,0)', (cid, name, folder, stamp))
     people = [{'id': cid, 'name': name, 'number': '+61 400 000 ' + str(n + 1).zfill(3), 'is_me': False}, {'id': 'self', 'name': 'You', 'number': '+61 400 000 000', 'is_me': True}]
+    if cid == 'dad':  # the phone repeats the account's own number as an ordinary participant
+        people.append({'id': 'profile', 'name': 'You', 'number': '+61 400 000 000', 'is_me': False, 'contact_id': 'profile'})
+    if cid == 'studio':
+        people.append({'id': 'maya', 'name': 'Maya Chen', 'number': '+61 400 000 003', 'is_me': False})
     db.execute('INSERT INTO conversation_details VALUES(?,?)', (cid, json.dumps(people).encode()))
     if cid == 'empty':
         continue
