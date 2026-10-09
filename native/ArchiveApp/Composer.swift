@@ -23,6 +23,7 @@ private struct ComposerContent: View {
     private struct Note { let text: String; let symbol: String; let warning: Bool }
     private var note: Note? {
         if let error = model.composerError { return Note(text: error, symbol: "exclamationmark.circle.fill", warning: true) }
+        if let voice = editorActions.voiceStatus { return Note(text: voice, symbol: "waveform", warning: voice.contains("Allow") || voice.contains("stopped")) }
         if let notice = model.reactionNotice { return Note(text: notice, symbol: "exclamationmark.circle.fill", warning: true) }
         if model.stagingAttachments { return Note(text: "Preparing attachments…", symbol: "clock", warning: false) }
         if model.draft.submissionID != nil && !model.draftIsInTimeline { return Note(text: "Checking send status. Your text is saved.", symbol: "clock", warning: false) }
@@ -59,9 +60,9 @@ private struct ComposerContent: View {
                     Image(systemName: "arrow.up.circle.fill").font(.system(size: 24)).frame(width: 28, height: 28)
                         .symbolEffect(.bounce, options: .nonRepeating, value: reduceMotion ? nil : model.sendPulse)
                 }
-                .buttonStyle(.bouncy).foregroundStyle(model.canSendDraft ? archiveAccent : Color.secondary.opacity(0.45))
+                .buttonStyle(.bouncy).foregroundStyle(model.canSendDraft || editorActions.dictating ? archiveAccent : Color.secondary.opacity(0.45))
                 .animation(.easeOut(duration: 0.15), value: model.canSendDraft)
-                .disabled(!model.canSendDraft).accessibilityLabel("Send message").help("Send (Return). Shift-Return adds a new line.")
+                .disabled(!model.canSendDraft && !editorActions.dictating).accessibilityLabel("Send message").help("Send (Return). Shift-Return adds a new line.")
                 .keyboardShortcut(.return, modifiers: .command)
             }
             .padding(.leading, 4).padding(.trailing, 4).padding(.vertical, 3)
@@ -74,6 +75,11 @@ private struct ComposerContent: View {
                     if model.draft.submissionID != nil && !model.syncState.canSend {
                         Button("Check Saved Status", action: model.checkSubmission).controlSize(.mini)
                     }
+                    if editorActions.voiceStatus?.contains("Privacy & Security") == true {
+                        Button("Open Settings") {
+                            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") { NSWorkspace.shared.open(url) }
+                        }.controlSize(.mini)
+                    }
                 }.font(.caption).foregroundStyle(note.warning ? .orange : .secondary).padding(.horizontal, 8)
             }
         }
@@ -82,22 +88,19 @@ private struct ComposerContent: View {
         .animation(Motion.quick, value: model.draft.attachments.count)
         .animation(Motion.quick, value: model.composerError)
         .animation(Motion.quick, value: model.reactionNotice)
+        .animation(Motion.quick, value: editorActions.voiceStatus)
         .onChange(of: model.sendPulse) { editorHeight = Self.oneLine }
         .fileImporter(isPresented: $choosingFiles, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
             if case .success(let urls) = result { model.attach(urls) }
         }
     }
 
-    /// Sending ends dictation first and waits a moment for its last words,
-    /// which arrive after it stops, so they go with the message.
+    /// Sending ends dictation first and waits for its last words, which arrive
+    /// after it stops, so they go with the message.
     private func send() {
-        guard model.canSendDraft else { return }
         guard editorActions.dictating else { model.sendDraft(); return }
-        editorActions.stopDictation()
         Task { @MainActor in
-            for _ in 0..<20 where editorActions.textView?.hasMarkedText() == true {
-                try? await Task.sleep(for: .milliseconds(50))
-            }
+            await editorActions.finishDictation()
             model.sendDraft()
         }
     }
@@ -106,7 +109,7 @@ private struct ComposerContent: View {
         ComposerTextView(text: Binding(get: { model.draftIsInTimeline ? "" : model.draft.body }, set: { model.editDraft($0) }),
                          isEditable: model.draft.submissionID == nil, spellCheck: spellCheck, autocorrect: autocorrect,
                          emojiShortcuts: emojiShortcuts, contextID: (model.directory?.path ?? "") + "/" + (model.selectedID ?? ""), focusToken: model.composerFocus, actions: editorActions,
-                         placeholder: "Message",
+                         placeholder: editorActions.dictating ? "Listening…" : "Message",
                          onSubmit: send,
                          onHeightChange: { editorHeight = $0 },
                          onFocusChange: { focused = $0 },
@@ -119,17 +122,26 @@ private struct ComposerContent: View {
     }
 }
 
-// Starts and stops the system's Dictation in the composer. While listening the
-// microphone fills with the accent colour and pulses gently.
+// Starts and stops voice input in the composer. While listening the microphone
+// fills with the accent colour, and a soft disc behind it follows your voice
+// (the on-device model) or the symbol pulses (macOS Dictation reports no level).
 private struct DictationButton: View {
     @ObservedObject var actions: ComposerEditorActions
+    @ObservedObject var meter: VoiceMeter
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    init(actions: ComposerEditorActions) { self.actions = actions; meter = actions.meter }
     var body: some View {
         Button(action: actions.toggleDictation) {
             Image(systemName: actions.dictating ? "mic.fill" : "mic").font(.system(size: 15, weight: .medium))
-                .symbolEffect(.pulse, options: .repeating, isActive: actions.dictating && !reduceMotion)
+                .symbolEffect(.pulse, options: .repeating, isActive: actions.dictating && meter.level == 0 && !reduceMotion)
                 .contentTransition(.symbolEffect(.replace))
-                .frame(width: 28, height: 28).contentShape(Rectangle())
+                .frame(width: 28, height: 28)
+                .background {
+                    Circle().fill(archiveAccent.opacity(actions.dictating ? 0.16 : 0))
+                        .scaleEffect(reduceMotion ? 1 : 0.75 + CGFloat(meter.level) * 0.45)
+                        .animation(.easeOut(duration: 0.12), value: meter.level)
+                }
+                .contentShape(Rectangle())
         }
         .buttonStyle(.bouncy).foregroundStyle(actions.dictating ? archiveAccent : Color.secondary)
         .animation(Motion.quick, value: actions.dictating)

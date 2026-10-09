@@ -26,6 +26,7 @@ private struct GeneralSettings: View {
     @AppStorage("spellCheck") private var spellCheck = true
     @AppStorage("autocorrect") private var autocorrect = false
     @AppStorage("emojiShortcuts") private var emojiShortcuts = true
+    @AppStorage("voiceInput") private var voiceInput = "speechModel"
     var body: some View {
         Form {
             Section("Appearance") {
@@ -44,8 +45,16 @@ private struct GeneralSettings: View {
                 Toggle("Correct spelling automatically", isOn: $autocorrect)
                 Toggle("Replace emoticons with emoji as you type", isOn: $emojiShortcuts)
                 Text("Try :)  ;)  :D  or <3. Use the smiley button for Emoji & Symbols.").font(.caption).foregroundStyle(.secondary)
+                if ComposerEditorActions.onDeviceAvailable {
+                    Picker("Voice input", selection: $voiceInput) {
+                        Text("Apple’s on-device speech model").tag("speechModel")
+                        Text("macOS Dictation").tag("dictation")
+                    }
+                    Text(voiceInput == "dictation" ? "Uses your Dictation language and settings." : "Transcribes on this Mac as you speak. The first time, it asks for the microphone and downloads the model for your language.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
             }
-        }.formStyle(.grouped).frame(height: 490)
+        }.formStyle(.grouped).frame(height: ComposerEditorActions.onDeviceAvailable ? 580 : 490)
         .onChange(of: dockBadge) { model.updateBadge() }
     }
 }

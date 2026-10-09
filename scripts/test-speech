@@ -1,0 +1,14 @@
+#!/bin/sh
+# Dictates a synthesized clip through Apple's on-device speech model (macOS 26).
+# The first run downloads the model for the Mac's language.
+set -eu
+task_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$task_root"
+mkdir -p .cache/swift-modules build
+task_clip=$(mktemp -t speech-check).aiff
+trap 'rm -f "$task_clip"' EXIT
+say -o "$task_clip" "Hello Alex, I will be there at nine. Can you bring the coffee?"
+swiftc -D ARCHIVE_TESTING -swift-version 6 -parse-as-library -module-cache-path .cache/swift-modules \
+  native/ArchiveApp/EmojiShortcuts.swift native/ArchiveApp/ComposerTextView.swift native/ArchiveApp/SpeechInput.swift \
+  native/ArchiveAppTests/SpeechTests.swift -o build/gm-speech-tests
+perl -e 'alarm 900; exec @ARGV' build/gm-speech-tests "$task_clip"

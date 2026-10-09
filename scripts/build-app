@@ -29,12 +29,14 @@ cat > "$task_staging/Contents/Info.plist" <<'PLIST'
   <key>CFBundleExecutable</key><string>Local Messages</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.9.1</string>
-  <key>CFBundleVersion</key><string>29</string>
+  <key>CFBundleShortVersionString</key><string>0.9.2</string>
+  <key>CFBundleVersion</key><string>30</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSPrincipalClass</key><string>NSApplication</string>
   <key>NSContactsUsageDescription</key><string>Local Messages only writes to Contacts when you choose Add to Contacts on a shared contact card.</string>
+  <key>NSMicrophoneUsageDescription</key><string>Local Messages listens only while you dictate a message. Your speech is transcribed on this Mac.</string>
+  <key>NSSpeechRecognitionUsageDescription</key><string>Your speech is transcribed on this Mac while you dictate a message.</string>
   <key>NSHumanReadableCopyright</key><string>Local Messages contributors. AGPL-3.0.</string>
 </dict></plist>
 PLIST
