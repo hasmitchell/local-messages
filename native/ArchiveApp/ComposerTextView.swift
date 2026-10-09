@@ -71,7 +71,13 @@ struct ComposerTextView: NSViewRepresentable {
             // Dictation belongs to the conversation it was started in.
             if actions.dictating { Task { @MainActor [actions] in actions.stopDictation() } }
         }
-        if contextChanged || textView.string != text {
+        // Only a change made outside the text view (a send clearing it, a
+        // restored draft, another conversation) is written into it. Words that
+        // Dictation or an input method is still composing exist only in the
+        // view, as marked text AppKit does not report; comparing with the
+        // view's own string would wipe them on the next redraw.
+        if contextChanged || text != coordinator.lastText {
+            coordinator.lastText = text
             // Programmatic draft changes (including a successful send) must
             // not retain undo operations targeting the previous text.
             textView.undoManager?.removeAllActions()
@@ -94,6 +100,12 @@ struct ComposerTextView: NSViewRepresentable {
         textView.attachData = onAttachData
         textView.attachImage = onAttachImage
         textView.cancelled = { [actions] in actions.dictationEnded() }
+        textView.finishDictation = { [actions] in
+            guard actions.dictating else { return false }
+            actions.stopDictation()
+            return true
+        }
+        textView.textActivity = { [actions] in actions.noteActivity() }
         // Focus is reported when the caret arrives, not at the first keystroke.
         // Async: makeFirstResponder can run inside a SwiftUI update.
         textView.focusChanged = { [onFocusChange] focused in DispatchQueue.main.async { onFocusChange(focused) } }
@@ -111,6 +123,9 @@ struct ComposerTextView: NSViewRepresentable {
     @MainActor final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: ComposerTextView
         var contextID: String?
+        /// The draft text as the model last had it: set when the view reports a
+        /// change and when the model's text is written into the view.
+        var lastText: String?
         /// Starts at the current token, so a freshly built composer does not take focus by itself.
         var focusToken: UUID
         weak var textView: ComposerNSTextView?
@@ -120,6 +135,7 @@ struct ComposerTextView: NSViewRepresentable {
 
         func textDidChange(_ notification: Notification) {
             guard let textView else { return }
+            lastText = textView.string
             parent.text = textView.string
             parent.actions.noteActivity()
             reportHeight()
@@ -145,6 +161,13 @@ final class ComposerNSTextView: NSTextView {
     private let editingUndoManager = UndoManager()
     override var undoManager: UndoManager? { editingUndoManager }
 
+    /// Dictation or an input method changed the text it is still composing.
+    var textActivity: (() -> Void)?
+    override func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
+        super.setMarkedText(string, selectedRange: selectedRange, replacementRange: replacementRange)
+        needsDisplay = true
+        textActivity?()
+    }
     override func insertText(_ insertString: Any, replacementRange: NSRange) {
         let composing = hasMarkedText()
         super.insertText(insertString, replacementRange: replacementRange)
@@ -165,8 +188,14 @@ final class ComposerNSTextView: NSTextView {
     }
     /// Return sends; Shift-Return (or Option-Return) adds a new line.
     var submit: (() -> Void)?
+    /// Ends dictation if it is running; true when it was.
+    var finishDictation: (() -> Bool)?
     private var keyModifiers: NSEvent.ModifierFlags = []
     override func keyDown(with event: NSEvent) {
+        // Return while dictating finishes the dictation and keeps the words;
+        // the next Return sends. Taken before the input context sees the key.
+        if [36, 76].contains(event.keyCode), event.modifierFlags.intersection([.shift, .option, .command, .control]).isEmpty,
+           finishDictation?() == true { return }
         keyModifiers = event.modifierFlags
         defer { keyModifiers = [] }
         super.keyDown(with: event)
@@ -308,10 +337,17 @@ enum PastedImage {
     func toggleDictation() { dictating ? stopDictation() : startDictation() }
     func startDictation() {
         guard let textView, textView.isEditable, let window = textView.window else { return }
-        window.makeFirstResponder(textView)
-        guard NSApp.sendAction(Selector(("startDictation:")), to: nil, from: nil) else { return }
+        let focused = window.firstResponder === textView
+        if !focused { window.makeFirstResponder(textView) }
         dictating = true
         lastDictation = Date()
+        // Dictation writes into whichever input context is current when it
+        // starts. After a focus change that is settled on the next turn.
+        let begin = { [weak self, weak textView] in
+            textView?.inputContext?.activate()
+            if !NSApp.sendAction(Selector(("startDictation:")), to: nil, from: nil) { self?.dictationEnded() }
+        }
+        if focused { begin() } else { DispatchQueue.main.async { MainActor.assumeIsolated { begin() } } }
         idleCheck?.cancel()
         idleCheck = Task { [weak self] in
             while !Task.isCancelled {

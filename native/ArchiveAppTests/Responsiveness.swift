@@ -14,6 +14,8 @@ import SwiftUI
     static var actualRows: [String: (top: CGFloat, height: CGFloat)] = [:]
     /// Renders every bubble as if hovered, to check the controls' placement.
     static var forceHover = false
+    /// Opens the reaction bar on every reactable bubble.
+    static var forceReactionBar: String? = nil
     /// Experiment switches from the command line: `--name value` or `--name`.
     static func option(_ name: String) -> String? {
         let arguments = CommandLine.arguments
@@ -273,6 +275,21 @@ import SwiftUI
             let saved = try await DraftRepository().load(directory: first)
             try check(saved["alex"]?.body == "Draft A 🙂" && saved["dad"]?.body == "Draft B", "quit flush lost a draft")
             report["composer_and_quit_flush"] = true
+
+            // Dictation and input methods hold words as marked text, which AppKit
+            // does not report as a change. A redraw of the composer must keep them.
+            guard let composing = Self.input else { throw Failure(message: "composer not found") }
+            composing.window?.makeFirstResponder(composing)
+            composing.setSelectedRange(NSRange(location: (composing.string as NSString).length, length: 0))
+            composing.setMarkedText(" dictated wor", selectedRange: NSRange(location: 13, length: 0), replacementRange: NSRange(location: NSNotFound, length: 0))
+            model.composerError = "Redraw the composer"
+            try await Task.sleep(for: .milliseconds(250))
+            model.composerError = nil
+            try await Task.sleep(for: .milliseconds(250))
+            try check(composing.hasMarkedText() && composing.string.hasSuffix(" dictated wor"), "a redraw wiped words still being dictated")
+            composing.insertText(" dictated words", replacementRange: composing.markedRange())
+            try check(model.draft.body == "Draft A 🙂 dictated words", "finished dictation did not reach the draft")
+            report["composing_text_survives_redraw"] = true
 
             model.editDraft("Latest text before reopen")
             model.open(first)

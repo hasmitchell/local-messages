@@ -88,11 +88,18 @@ private struct ComposerContent: View {
         }
     }
 
-    /// Sending ends dictation first, so later words cannot land in the cleared field.
+    /// Sending ends dictation first and waits a moment for its last words,
+    /// which arrive after it stops, so they go with the message.
     private func send() {
         guard model.canSendDraft else { return }
+        guard editorActions.dictating else { model.sendDraft(); return }
         editorActions.stopDictation()
-        model.sendDraft()
+        Task { @MainActor in
+            for _ in 0..<20 where editorActions.textView?.hasMarkedText() == true {
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+            model.sendDraft()
+        }
     }
 
     private var editor: some View {

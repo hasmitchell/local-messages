@@ -361,6 +361,10 @@ enum SnapshotRunner {
         case "empty": if let empty = model.conversations.first(where: { $0.messageCount == 0 }) { model.select(empty.id) }
         case "contact": if let dad = model.conversations.first(where: { $0.id == "dad" }) { model.select(dad.id) }
         case "draft": model.editDraft("A draft that has not been sent yet.\nSecond line of the draft.")
+        case "reactions":
+            RenderCount.forceHover = true; RenderCount.forceReactionBar = "on"
+            model.canSync = true; model.syncEnabled = true; model.syncState = .connected
+            if let id = model.selectedID { model.select(id, force: true) }
         case "old": model.select("alex", messageID: "alex-0000")
         case "newmessage": model.showingNewMessage = true
         case "inspector":

@@ -649,6 +649,16 @@ private struct MessageBubble: View {
     #else
     @State private var hovered = false
     #endif
+    /// The reaction bar: opens when the pointer rests on the smiley and stays
+    /// while it is over the smiley or the bar.
+    #if UI_SNAPSHOTS
+    @State private var picking = RenderCount.forceReactionBar != nil
+    #else
+    @State private var picking = false
+    #endif
+    @State private var overSmiley = false
+    @State private var overBar = false
+    @State private var pickerTimer: Task<Void, Never>?
 
     private var shape: UnevenRoundedRectangle {
         let big: CGFloat = 18, small: CGFloat = 5
@@ -716,6 +726,7 @@ private struct MessageBubble: View {
     // 24 pt stays free on the far side.
     private var placedBubble: some View {
         bubble.overlay(alignment: message.outgoing ? .leading : .trailing) { sideDetails }
+            .overlay { if hovered && !message.outgoing { reactionBarLayer } }
             .frame(maxWidth: maxWidth, alignment: message.outgoing ? .trailing : .leading)
             .padding(message.outgoing ? .leading : .trailing, 24)
             .frame(maxWidth: .infinity, alignment: message.outgoing ? .trailing : .leading)
@@ -741,16 +752,56 @@ private struct MessageBubble: View {
             .accessibilityHidden(!hovering)
     }
     private var reactButton: some View {
-        // A fixed slot keeps the controls beside the menu from moving.
-        Menu { reactionItems } label: {
-            Image(systemName: "face.smiling").font(.system(size: 15)).foregroundStyle(.secondary)
+        // Resting on the smiley opens the reaction bar; a click toggles it too.
+        Button { withAnimation(Motion.bouncy) { picking.toggle() } } label: {
+            Image(systemName: picking ? "face.smiling.inverse" : "face.smiling").font(.system(size: 15))
+                .foregroundStyle(picking ? archiveAccent : .secondary)
+                .frame(width: 24, height: 20).contentShape(Rectangle())
         }
-        .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
-        .opacity(hovering && reactable ? 1 : 0)
-        .scaleEffect(hovering ? 1 : 0.7)
+        .buttonStyle(.bouncy)
+        .onHover { overSmiley = $0; pickerHoverChanged() }
+        .opacity((hovering || picking) && reactable ? 1 : 0)
+        .scaleEffect(hovering || picking ? 1 : 0.7)
         .animation(Motion.quick, value: hovering)
+        .disabled(!reactable)
+        .help("React")
         .accessibilityLabel("React to message")
-        .frame(width: 24, height: 20)
+    }
+    /// The bar opens over the smiley, level with it, so the pointer is already
+    /// on it; it reaches left across the bubble but never past its leading edge.
+    private var reactionBarLayer: some View {
+        GeometryReader { proxy in
+            ZStack(alignment: .topLeading) {
+                if picking && reactable {
+                    ReactionBar(current: ownReaction) { emoji in
+                        model.react(message, emoji: emoji)
+                        closePicker()
+                    }
+                    .onHover { overBar = $0; pickerHoverChanged() }
+                    .offset(x: max(0, proxy.size.width + 32 - ReactionBar.width), y: (proxy.size.height - ReactionBar.height) / 2)
+                    .transition(.scale(scale: 0.6, anchor: .trailing).combined(with: .opacity))
+                }
+            }
+            .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topLeading)
+        }
+    }
+    /// A short pause before opening, so passing over the smiley does not flash
+    /// the bar; a slightly longer one before closing, so the pointer can travel
+    /// from the smiley up to the bar.
+    private func pickerHoverChanged() {
+        pickerTimer?.cancel()
+        let inside = overSmiley || overBar
+        guard inside != picking else { return }
+        pickerTimer = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(inside ? 120 : 300))
+            guard !Task.isCancelled, (overSmiley || overBar) == inside else { return }
+            withAnimation(inside ? Motion.bouncy : Motion.quick) { picking = inside }
+        }
+    }
+    private func closePicker() {
+        pickerTimer?.cancel()
+        overSmiley = false; overBar = false
+        withAnimation(Motion.quick) { picking = false }
     }
     private var replyButton: some View {
         Button { model.setReplyTarget(message) } label: {
@@ -832,6 +883,40 @@ private struct MessageBubble: View {
     }
 }
 
+
+/// The quick reactions in a row: each grows under the pointer, the one you
+/// have already chosen is marked, and choosing it again takes it off.
+private struct ReactionBar: View {
+    static let width: CGFloat = 6 * 32 + 5 * 2 + 12
+    static let height: CGFloat = 32 + 6
+    let current: String?
+    let pick: (String) -> Void
+    @State private var pointed: String?
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(quickReactions, id: \.self) { emoji in
+                Button { pick(emoji) } label: {
+                    Text(emoji).font(.system(size: 20))
+                        .frame(width: 32, height: 32)
+                        .background(Circle().fill(archiveAccent.opacity(current == emoji ? 0.25 : 0)))
+                        .scaleEffect(pointed == emoji ? 1.22 : 1)
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.bouncy)
+                .onHover { inside in
+                    withAnimation(Motion.bouncy) { if inside { pointed = emoji } else if pointed == emoji { pointed = nil } }
+                }
+                .help(current == emoji ? "Remove your reaction" : "React with \(emoji)")
+                .accessibilityLabel(current == emoji ? "Remove your \(emoji) reaction" : "React with \(emoji)")
+            }
+        }
+        .padding(.horizontal, 6).padding(.vertical, 3)
+        .background(.regularMaterial, in: Capsule())
+        .overlay(Capsule().strokeBorder(.quaternary, lineWidth: 1))
+        .shadow(color: .black.opacity(0.18), radius: 8, y: 3)
+        .fixedSize()
+    }
+}
 
 private struct ReplyQuote: View {
     let model: ArchiveModel
