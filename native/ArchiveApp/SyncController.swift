@@ -92,9 +92,13 @@ final class SyncController: NSObject {
     }
 
     var isStopped: Bool { process == nil && retiring.allSatisfy { !$0.isRunning } }
+    /// Changes whenever the worker is stopped or replaced.
+    var workerGeneration: UUID { generation }
+    /// Nothing was written: no worker is running or it has no phone connection yet.
+    struct NotConnected: Error {}
 
     func send(_ command: SendCommand) throws {
-        guard let process, process.isRunning, let lifetime, let connectionID else { throw CocoaError(.fileWriteUnknown) }
+        guard let process, process.isRunning, let lifetime, let connectionID else { throw NotConnected() }
         var bound = command
         bound.connection = connectionID
         var data = try JSONEncoder().encode(bound)

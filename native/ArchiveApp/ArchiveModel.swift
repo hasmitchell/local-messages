@@ -57,7 +57,17 @@ final class ArchiveModel {
     var settingsNotice: String?
     var settingsError: String?
     var stagingAttachments = false
-    var pendingReactions: [String: String] = [:]
+    /// A reaction chosen on this Mac. It shows on its message at once and stays
+    /// until the phone's copy of the message agrees or the phone reports a failure.
+    struct PendingReaction: Equatable { let submission, conversationID, emoji: String; let sent: Date }
+    /// By message id.
+    private(set) var pendingReactions: [String: PendingReaction] = [:]
+    /// When the phone accepted each pending reaction, by submission.
+    @ObservationIgnored private var reactionsApplied: [String: Date] = [:]
+    /// Why a reaction did not go through. Shown under the composer for a few
+    /// seconds; typing does not clear it, unlike composerError.
+    private(set) var reactionNotice: String?
+    @ObservationIgnored private var reactionNoticeTask: Task<Void, Never>?
     @ObservationIgnored private let settingsRepository = SettingsRepository()
     @ObservationIgnored private let attachmentStager = AttachmentStager()
     @ObservationIgnored private var threadSearchTask: Task<Void, Never>?
@@ -73,20 +83,47 @@ final class ArchiveModel {
         controller.onTyping = { [weak self] digest, active in self?.typingChanged(digest: digest, active: active) }
         return controller
     }()
+    /// True once this worker session has finished its first catch-up.
+    @ObservationIgnored private var sessionSettled = false
     func syncStateChanged(_ state: SyncState) {
+        switch state {
+        case .connected, .photosPending: sessionSettled = true
+        // Every message, receipt and send makes the worker re-read that
+        // conversation. Once connected, those passes are not news: the status
+        // bar would flash "Catching up…" for each one.
+        case .catchingUp, .checkingInbox, .checkingArchive: if sessionSettled { return }
+        case .incomplete, .keychainError: break
+        default: sessionSettled = false
+        }
         // The worker repeats its status every pass. Publishing an unchanged
         // value would re-render every view that reads the model.
         guard state != syncState else { return }
         let wasReady = syncState.canSend
         syncState = state
-        if state.canSend && !wasReady { sendPresence() }
+        if state.canSend && !wasReady {
+            sendPresence()
+            let dismissals = undeliveredDismissals
+            undeliveredDismissals = []
+            for command in dismissals { do { try deliver(command) } catch { undeliveredDismissals.append(command) } }
+            // The conversation opened while connecting was only marked seen here.
+            if windowIsKey, NSApp.isActive, !loadingMessages, highlightedID == nil, timelineAtBottom, !hasLater { markReadOnPhoneIfNeeded() }
+        }
     }
     /// Conversations where the other side is typing, by the worker's digest of the conversation id.
     private(set) var typingDigests: [String: Date] = [:]
     @ObservationIgnored private var typingDigestCache: [String: String] = [:]
     @ObservationIgnored private var lastTypingSent: (conversation: String, at: Date)?
     func typingChanged(digest: String, active: Bool) {
-        if active { typingDigests[digest] = Date() } else { typingDigests.removeValue(forKey: digest) }
+        let open = selectedID.map { typingDigest($0) == digest } ?? false
+        let wasShown = typingDigests[digest] != nil
+        // The open conversation's indicator springs in and out, and the
+        // timeline follows it so it is not added below the visible area.
+        withAnimation(open && wasShown != active ? Motion.spring : nil) {
+            if active { typingDigests[digest] = Date() } else { typingDigests.removeValue(forKey: digest) }
+        }
+        if open, wasShown != active, TimelinePolicy.followsLatest(atBottom: timelineAtBottom, hasLater: hasLater, highlighting: highlightedID != nil) {
+            scrollRequest = ScrollRequest(messageID: "timeline-bottom", atBottom: true, animated: true)
+        }
     }
     private func typingDigest(_ conversationID: String) -> String {
         if let cached = typingDigestCache[conversationID] { return cached }
@@ -101,7 +138,8 @@ final class ArchiveModel {
     }
     private func expireTyping() {
         let stale = typingDigests.filter { Date().timeIntervalSince($0.value) >= 8 }.map(\.key)
-        for key in stale { typingDigests.removeValue(forKey: key) }
+        guard !stale.isEmpty else { return }
+        withAnimation(Motion.spring) { for key in stale { typingDigests.removeValue(forKey: key) } }
     }
     /// Lets the phone show that a reply is being written, at most once every four seconds.
     private func sendTypingIfNeeded(_ conversationID: String) {
@@ -149,9 +187,38 @@ final class ArchiveModel {
     private(set) var localOutbox: [String: OutboxRecord] = [:]
     private(set) var messageSubmissions: [String: String] = [:]
     private(set) var sendPulse = UUID()
+    /// Timeline rows just sent from here, or just arrived while following the
+    /// latest messages: they ease in (RowEntrance) for about a second.
+    private(set) var arrivingRows: Set<String> = []
+    /// Ends the entrance, so a row rebuilt later (reopening the conversation,
+    /// scrolling away and back) shows as it is instead of entering again.
+    private func settleArrivals(_ rows: Set<String>) {
+        guard !rows.isEmpty else { return }
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(1))
+            guard let self, !self.arrivingRows.isDisjoint(with: rows) else { return }
+            self.arrivingRows.subtract(rows)
+        }
+    }
     private var followingSubmission: String?
     var followingOwnSend: Bool { followingSubmission != nil }
-    func userScrolledTimeline() { followingSubmission = nil }
+    /// True briefly while the timeline eases down to something that just
+    /// arrived: a tall message is momentarily below the edge, and the jump
+    /// button should not flash in and out for it.
+    private(set) var followingArrival = false
+    @ObservationIgnored private var followToken = UUID()
+    private func holdJumpButtonWhileFollowing() {
+        let token = UUID(); followToken = token
+        if !followingArrival { followingArrival = true }
+        Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(700))
+            if let self, self.followToken == token { self.followingArrival = false }
+        }
+    }
+    func userScrolledTimeline() {
+        followingSubmission = nil
+        if followingArrival { followToken = UUID(); followingArrival = false }
+    }
     #if UI_SNAPSHOTS
     @ObservationIgnored var simulatedSend: ((SendCommand) throws -> Void)?
     #endif
@@ -166,6 +233,8 @@ final class ArchiveModel {
         return displayedOutbox.contains { $0.id == submission }
     }
     var composerError: String?
+    /// A new value puts the caret in the composer.
+    var composerFocus = UUID()
     @ObservationIgnored private let draftRepository = DraftRepository()
     @ObservationIgnored private var draftRevision = 0
     @ObservationIgnored private var arrivalSequence: Int64 = 0
@@ -195,28 +264,62 @@ final class ArchiveModel {
         guard let id = selectedID, draft.submissionID == nil, let directory else { return }
         drafts[id] = DraftRecord(body: draft.body, files: draft.files, replyTo: message?.id)
         persistDrafts(directory: directory)
+        if message != nil { composerFocus = UUID() }
     }
     /// Sends text straight from a notification reply; the outbox still records the attempt.
     func quickReply(conversation: String, text: String) {
         guard canSync, syncEnabled, syncState.canSend, !pairingBusy, SendCommand.validBody(text),
               conversations.contains(where: { $0.id == conversation }) else {
-            Task { await notifications.deliverFailure("Reply not sent", body: "The phone connection is not ready. Open Local Messages to send it.") }
+            let kept = SendCommand.validBody(text) && keepReplyAsDraft(text, conversation: conversation)
+            Task { await notifications.deliverFailure("Reply not sent", body: kept ? "Your reply was saved as a draft. Open Local Messages to send it." : "The phone connection is not ready. Open Local Messages to send it.") }
             return
         }
         do { try syncController.send(SendCommand(id: UUID().uuidString.lowercased(), conversationID: conversation, body: text)) }
-        catch { Task { await notifications.deliverFailure("Reply not sent", body: "The phone connection dropped. Open Local Messages to send it.") } }
+        catch {
+            let kept = keepReplyAsDraft(text, conversation: conversation)
+            Task { await notifications.deliverFailure("Reply not sent", body: kept ? "Your reply was saved as a draft. Open Local Messages to send it." : "The phone connection dropped. Open Local Messages to send it.") }
+        }
+    }
+    /// Keeps a notification reply that could not be sent as the conversation's draft.
+    private func keepReplyAsDraft(_ text: String, conversation: String) -> Bool {
+        guard let directory, conversations.contains(where: { $0.id == conversation }) else { return false }
+        var saved = drafts[conversation] ?? DraftRecord()
+        guard saved.submissionID == nil else { return false }
+        saved.body = saved.body.isEmpty ? text : saved.body + "\n" + text
+        drafts[conversation] = saved
+        persistDrafts(directory: directory)
+        return true
     }
     /// Data dropped or pasted into the conversation becomes a staged file.
     func attachData(_ data: Data, suggestedName: String) {
-        guard selectedID != nil, !data.isEmpty, data.count <= DraftAttachment.byteLimit else { composerError = AttachmentFailure.limit.localizedDescription; return }
+        guard selectedID != nil, let file = temporaryFile(data, suggestedName: suggestedName) else { return }
+        attach([file])
+    }
+    /// A pasted image that needs converting (TIFF or PDF). The composer counts
+    /// as busy from the start, so Return cannot send the text without it.
+    func attachConverting(_ raw: Data) {
+        guard selectedID != nil, !stagingAttachments, draft.submissionID == nil else { return }
+        stagingAttachments = true
+        let generation = archiveGeneration
+        Task {
+            let converted = await Task.detached(priority: .userInitiated) { NSImage(data: raw).flatMap(PastedImage.compressed(from:)) }.value
+            guard generation == archiveGeneration else { return }
+            stagingAttachments = false
+            if let converted { attachData(converted.data, suggestedName: converted.name) }
+            else { composerError = "This image could not be attached." }
+        }
+    }
+    /// Writes pasted or dropped data to a private temporary file for staging; it is removed after 30 seconds.
+    func temporaryFile(_ data: Data, suggestedName: String) -> URL? {
+        guard !data.isEmpty, data.count <= DraftAttachment.byteLimit else { composerError = AttachmentFailure.limit.localizedDescription; return nil }
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("local-messages-paste-" + UUID().uuidString, isDirectory: true)
         do {
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
             let file = folder.appendingPathComponent(suggestedName)
             try data.write(to: file, options: .atomic)
-            attach([file])
             Task { try? await Task.sleep(for: .seconds(30)); try? FileManager.default.removeItem(at: folder) }
-        } catch { composerError = AttachmentFailure.storage.localizedDescription }
+            return file
+        } catch { composerError = AttachmentFailure.storage.localizedDescription; return nil }
     }
     func hasContacts() async -> Bool { (try? await database?.hasContacts()) ?? false }
     func searchContacts(_ query: String) async -> [ContactEntry] {
@@ -263,12 +366,14 @@ final class ArchiveModel {
             drafts[id] = DraftRecord(body: body, submissionID: submission, files: files, replyTo: replyTo)
             localOutbox[submission] = pending
             sendPulse = UUID(uuidString: submission)!
+            arrivingRows.insert("outbox-" + submission)
             if !hasLater {
                 highlightedID = nil
                 scrollRequest = ScrollRequest(messageID: "timeline-bottom", atBottom: true, animated: true)
             }
         }
-        revealLatestForSend(conversation: id)
+        settleArrivals(["outbox-" + submission])
+        if hasLater { revealLatest(conversation: id, animated: true) }
         draftRevision += 1
         let revision = draftRevision, snapshot = drafts
         composerError = nil
@@ -279,12 +384,17 @@ final class ArchiveModel {
                 // committed an outbox row. A crash cannot silently lose a draft.
                 try await draftRepository.save(snapshot, directory: directory, revision: revision)
                 guard archiveGeneration == generation else { return }
-                #if UI_SNAPSHOTS
-                if let simulatedSend { try simulatedSend(command) }
-                else { try syncController.send(command) }
-                #else
-                try syncController.send(command)
-                #endif
+                try deliver(command)
+                if !simulating { deliveredTo[submission] = (syncController.workerGeneration, Date()) }
+                await acknowledgeSoon(submission, directory: directory, generation: generation)
+            } catch is SyncController.NotConnected {
+                // Nothing reached the worker: hand the message straight back.
+                guard archiveGeneration == generation else { return }
+                if followingSubmission == submission { followingSubmission = nil }
+                localOutbox.removeValue(forKey: submission)
+                if drafts[id]?.submissionID == submission { drafts[id]?.submissionID = nil }
+                persistDrafts(directory: directory)
+                composerError = "Not sent because your phone isn’t connected. Your message is ready to send again."
             } catch {
                 if archiveGeneration == generation {
                     if followingSubmission == submission { followingSubmission = nil }
@@ -294,24 +404,101 @@ final class ArchiveModel {
             }
         }
     }
-    private func revealLatestForSend(conversation: String) {
-        guard hasLater, let reader = conversationDatabase else { return }
+    /// Sends handed to a worker that has not recorded them yet, with that worker and when.
+    @ObservationIgnored private var deliveredTo: [String: (worker: UUID, at: Date)] = [:]
+    /// A worker records a send the moment it reads it. One that was stopped or
+    /// replaced first never will, and a stopped worker sends nothing, so the
+    /// message goes back to the composer instead of waiting there for good.
+    private func recoverLostSends(_ reader: ArchiveDatabase, generation: UUID) async throws {
+        for (submission, delivery) in deliveredTo {
+            if try await reader.submissionExists(submission) { deliveredTo.removeValue(forKey: submission); continue }
+            guard archiveGeneration == generation else { return }
+            guard delivery.worker != syncController.workerGeneration || syncController.isStopped,
+                  Date().timeIntervalSince(delivery.at) > 10 else { continue }
+            deliveredTo.removeValue(forKey: submission)
+            localOutbox.removeValue(forKey: submission)
+            if followingSubmission == submission { followingSubmission = nil }
+            guard let directory, let conversation = drafts.first(where: { $0.value.submissionID == submission })?.key else { continue }
+            drafts[conversation]?.submissionID = nil
+            persistDrafts(directory: directory)
+            if selectedID == conversation { composerError = "Not sent because the connection to your phone restarted. Your message is ready to send again." }
+        }
+    }
+    /// The worker records a send within milliseconds. Free the composer as soon
+    /// as it has, rather than at the next one-second poll, so typing can go on.
+    private func acknowledgeSoon(_ submission: String, directory: URL, generation: UUID) async {
+        guard let reader = database else { return }
+        for _ in 0..<40 {
+            guard (try? await Task.sleep(for: .milliseconds(25))) != nil, archiveGeneration == generation, drafts.values.contains(where: { $0.submissionID == submission }) else { return }
+            if (try? await reader.submissionExists(submission)) == true {
+                try? await acknowledgeDrafts(reader, directory: directory, generation: generation)
+                return
+            }
+        }
+    }
+    private var simulating: Bool {
+        #if UI_SNAPSHOTS
+        simulatedSend != nil
+        #else
+        false
+        #endif
+    }
+    /// Hands a send or reaction to the worker (or, in review builds, to the synthetic sink).
+    private func deliver(_ command: SendCommand) throws {
+        #if UI_SNAPSHOTS
+        if let simulatedSend { try simulatedSend(command); return }
+        #endif
+        try syncController.send(command)
+    }
+    /// Swaps in the newest page and goes to the bottom. The current page stays
+    /// on screen until then: no spinner, and nothing is rebuilt from scratch.
+    private func revealLatest(conversation: String, animated: Bool) {
+        guard let reader = conversationDatabase, !paging else { return }
+        // A background refresh already under way would put the old range back:
+        // a new generation retires it, and paging holds off the next ones.
+        messageGeneration = UUID()
         let generation = messageGeneration
+        paging = true
         Task {
             do {
-                let window = try await reader.latest(conversation: conversation)
+                let snapshot = try await reader.timeline(conversation: conversation)
                 guard messageGeneration == generation, selectedID == conversation else { return }
-                // Keep the old history visible until the latest page is ready.
-                apply(window)
+                withTransaction(Transaction(animation: nil)) { apply(snapshot.window); applyOutbox(shownOutbox(snapshot.outbox)) }
+                paging = false
                 highlightedID = nil
-                scrollRequest = ScrollRequest(messageID: "timeline-bottom", atBottom: true, animated: true)
-            } catch { if messageGeneration == generation { self.error = readableError(error) } }
+                scrollRequest = ScrollRequest(messageID: "timeline-bottom", atBottom: true, animated: animated)
+                if windowIsKey && NSApp.isActive { markVisibleAsSeen() }
+            } catch {
+                guard messageGeneration == generation else { return }
+                paging = false
+                self.error = readableError(error)
+            }
         }
     }
     func restoreDraft(_ message: OutboxRecord) {
         guard draft.body.isEmpty, draft.attachments.isEmpty, !message.isReaction, let directory, selectedID == message.conversationID else { return }
-        drafts[message.conversationID] = DraftRecord(body: message.body, files: message.files)
+        drafts[message.conversationID] = DraftRecord(body: message.body, files: message.files, replyTo: message.command?.replyTo)
         persistDrafts(directory: directory)
+        composerFocus = UUID()
+        // The text is back in the composer; the failed copy has nothing left to say.
+        dismissSend(message)
+    }
+    /// Failed or unconfirmed attempts the user cleared. They leave the timeline
+    /// at once; the worker records it now, or once the phone reconnects.
+    @ObservationIgnored private var dismissedSends: Set<String> = []
+    @ObservationIgnored private var undeliveredDismissals: [SendCommand] = []
+    func canDismiss(_ message: OutboxRecord) -> Bool {
+        ["failed", "unknown"].contains(message.state) && outbox.contains { $0.id == message.id }
+    }
+    func dismissSend(_ message: OutboxRecord) {
+        guard canDismiss(message) else { return }
+        dismissedSends.insert(message.id)
+        outbox.removeAll { $0.id == message.id }
+        let command = SendCommand(kind: "dismiss", id: message.id, conversationID: message.conversationID, body: "")
+        do { try deliver(command) } catch { undeliveredDismissals.append(command) }
+    }
+    private func shownOutbox(_ rows: [OutboxRecord]) -> [OutboxRecord] {
+        dismissedSends.isEmpty ? rows : rows.filter { !dismissedSends.contains($0.id) }
     }
     func checkSubmission() {
         guard let database, let directory else { return }
@@ -425,7 +612,8 @@ final class ArchiveModel {
         refreshTask?.cancel()
         syncController.configure(directory: nil, enabled: false)
         canSync = false
-        pendingReactions = [:]; stagingAttachments = false
+        pendingReactions = [:]; reactionsApplied = [:]; stagingAttachments = false
+        dismissedSends = []; undeliveredDismissals = []; deliveredTo = [:]; waitingReactionNotices = [:]
         drafts = [:]
         outbox = []
         localOutbox = [:]
@@ -488,9 +676,18 @@ final class ArchiveModel {
                     do { try store.register(directory: url); accounts = store.profiles }
                     catch { accountError = "This archive opened, but it could not be saved to the account list." }
                 }
-                notifications.configure(directory: live ? url : nil, select: { [weak self] conversation, message in
-                    guard self?.archiveGeneration == generation else { return }
-                    self?.select(conversation, messageID: message)
+                notifications.configure(directory: live ? url : nil, select: { [weak self] conversation, _ in
+                    guard let self, self.archiveGeneration == generation else { return }
+                    // A banner is about new messages: open at the newest, as
+                    // Messages does, rather than pinning a highlight that stops
+                    // the timeline following and leaves the thread unread.
+                    if let record = self.conversations.first(where: { $0.id == conversation }) { self.filter = record.isArchived ? .archived : .inbox }
+                    if self.selectedID == conversation {
+                        self.jumpToLatest()
+                        if !self.hasLater { self.markVisibleAsSeen() }
+                    } else {
+                        self.select(conversation)
+                    }
                 }, reply: { [weak self] conversation, text in
                     guard self?.archiveGeneration == generation else { return }
                     self?.quickReply(conversation: conversation, text: text)
@@ -528,6 +725,8 @@ final class ArchiveModel {
                         }
                         try await self.refreshVisible(reader, generation: generation)
                     }
+                    if !self.pendingReactions.isEmpty { try await self.settleReactions(reader, generation: generation) }
+                    if !self.deliveredTo.isEmpty { try await self.recoverLostSends(reader, generation: generation) }
                     if self.canSync { try await self.checkArrivals(reader, generation: generation) }
                     self.checkStartTimeout()
                     self.expireTyping()
@@ -549,39 +748,48 @@ final class ArchiveModel {
         if overview != snapshot { overview = snapshot; updateBadge() }
         try await checkPendingStart(reader, generation: generation)
         if let directory { try await acknowledgeDrafts(reader, directory: directory, generation: generation) }
-        for (message, submission) in pendingReactions {
-            if try await reader.submissionExists(submission) { pendingReactions.removeValue(forKey: message) }
-        }
         guard archiveGeneration == generation else { return }
         let messageToken = messageGeneration
+        var openChanged = false
         if let id = selectedID, !loadingMessages, !paging {
             let following = followingSubmission != nil || TimelinePolicy.followsLatest(atBottom: timelineAtBottom, hasLater: hasLater, highlighting: highlightedID != nil)
             let snapshot = try await reader.timeline(conversation: id, visible: messages, followingLatest: following)
-            let window = snapshot.window, pending = snapshot.outbox
+            let window = snapshot.window, pending = shownOutbox(snapshot.outbox)
             guard archiveGeneration == generation, messageGeneration == messageToken, !paging else { return }
             // Capture the position before adding rows changes the scrollable
             // height. Apply the rows and their scroll request in one UI update.
             let shouldFollow = following && (timelineAtBottom || followingSubmission != nil)
             let contentChanged = window.messages != messages || pending != outbox
+            openChanged = contentChanged
             let oldIDs = Set(messages.map { messageSubmissions[$0.id].map { "outbox-" + $0 } ?? $0.id } + displayedOutbox.filter { !$0.isReaction }.map { "outbox-" + $0.id })
             let newIDs = Set(window.messages.map { window.submissions[$0.id].map { "outbox-" + $0 } ?? $0.id } + pending.filter { !$0.isReaction }.map { "outbox-" + $0.id })
-            let inserted = !newIDs.subtracting(oldIDs).isEmpty
+            // A few new rows at the bottom ease in (RowEntrance); a large batch,
+            // such as a catch-up after reconnecting, simply appears.
+            let added = newIDs.subtracting(oldIDs)
+            let arriving = shouldFollow && added.count <= 3 ? added : []
             // Confirmation keeps the existing row in place; a new row's entrance
-            // is the bubble's own (SendBubbleEntrance), not a replayed send.
-            var transaction = Transaction(animation: nil)
-            transaction.disablesAnimations = true
-            withTransaction(transaction) { apply(window); applyOutbox(pending) }
+            // is its own, never a replayed send. Changes inside rows (a reaction
+            // badge, "Delivered" becoming "Read") still run their own animations.
+            withTransaction(Transaction(animation: nil)) {
+                apply(window); applyOutbox(pending)
+                if !arriving.isSubset(of: arrivingRows) { arrivingRows.formUnion(arriving) }
+            }
+            settleArrivals(arriving)
             if let followingSubmission, window.submissions.values.contains(followingSubmission) { self.followingSubmission = nil }
             if shouldFollow && contentChanged {
                 // Animated even when nothing was inserted: a reaction badge or a
                 // status line grows the content, and the bottom eases into view.
-                _ = inserted
                 scrollRequest = ScrollRequest(messageID: "timeline-bottom", atBottom: true, animated: true)
+                holdJumpButtonWhileFollowing()
                 if windowIsKey && NSApp.isActive { markVisibleAsSeen() }
             }
         }
-        if showingThreadSearch && !threadQuery.isEmpty { scheduleThreadSearch() }
-        if showingDetails { loadLibrary(reset: false) }
+        // Writes elsewhere in the archive leave Find and the info popover as they
+        // are; when this conversation changes they update without a spinner.
+        if openChanged {
+            if showingThreadSearch && !threadQuery.isEmpty { refreshThreadSearch() }
+            if showingDetails { loadLibrary(reset: false, quiet: true) }
+        }
         if isSearching {
             let searchToken = searchGeneration
             let result = try await reader.search(query, conversation: nil, limit: searchLimit)
@@ -598,7 +806,8 @@ final class ArchiveModel {
             arrivalSequence = arrival.sequence
             let alreadyVisible = NSApp.isActive && windowIsKey && timelineAtBottom && !hasLater && messages.contains(where: { $0.id == arrival.message.id })
             if NotificationPolicy.shouldNotify(arrival.message, started: arrivalStart, now: Date(), activeConversation: alreadyVisible && !notifications.notifyWhileReading ? selectedID : nil) {
-                await notifications.deliver(arrival.message, title: conversationTitle(arrival.message.conversationID))
+                let group = conversations.first { $0.id == arrival.message.conversationID }?.isGroup == true
+                await notifications.deliver(arrival.message, title: conversationTitle(arrival.message.conversationID), sender: group ? arrival.message.sender : nil)
                 guard archiveGeneration == generation else { return }
             }
         }
@@ -610,9 +819,11 @@ final class ArchiveModel {
     }
 
     func jumpToLatest() {
-        if hasLater { showLatest() }
+        if hasLater, let id = selectedID { followingSubmission = nil; revealLatest(conversation: id, animated: false) }
         else {
             highlightedID = nil
+            // If the view is already there, no scroll event will say so.
+            if !timelineAtBottom { timelineAtBottom = true }
             scrollRequest = ScrollRequest(messageID: "timeline-bottom", atBottom: true, animated: true)
         }
     }
@@ -646,7 +857,8 @@ final class ArchiveModel {
         if id != selectedID || messageID != nil || force { followingSubmission = nil }
         if !force, selectedID == id {
             if let messageID, messages.contains(where: { $0.id == messageID }) {
-                timelineAtBottom = false
+                // The scroll observers report the real position; a message near
+                // the bottom may not move the view at all.
                 highlightedID = messageID
                 scrollRequest = ScrollRequest(messageID: messageID, atBottom: false)
                 return
@@ -666,7 +878,10 @@ final class ArchiveModel {
         messages = []
         messageSubmissions = [:]
         outbox = []
+        arrivingRows = []
+        if followingArrival { followToken = UUID(); followingArrival = false }
         composerError = nil
+        showReactionNotice(waitingReactionNotices.removeValue(forKey: id))
         hasEarlier = false
         hasLater = false
         paging = false
@@ -681,7 +896,7 @@ final class ArchiveModel {
                 let snapshot = try await database.timeline(conversation: id, messageID: messageID)
                 guard !Task.isCancelled, messageGeneration == generation else { return }
                 apply(snapshot.window)
-                applyOutbox(snapshot.outbox)
+                applyOutbox(shownOutbox(snapshot.outbox))
                 loadingMessages = false
                 if messageID == nil { markVisibleAsSeen() }
                 if let anchor = messageID ?? messages.last?.id {
@@ -724,9 +939,11 @@ final class ArchiveModel {
         searchTask?.cancel()
         let generation = UUID()
         searchGeneration = generation
-        if more { searchLimit += 100 } else { searchLimit = 100; searchResults = []; searchTotal = 0 }
+        // Earlier results stay until the new page lands, so typing does not
+        // empty and refill the list on every keystroke.
+        if more { searchLimit += 100 } else { searchLimit = 100 }
         searchError = nil
-        guard isSearching, let database else { searching = false; highlightedID = nil; return }
+        guard isSearching, let database else { searching = false; searchResults = []; searchTotal = 0; highlightedID = nil; return }
         let text = query
         let scope: String? = nil
         let limit = searchLimit
@@ -775,21 +992,91 @@ final class ArchiveModel {
         drafts[conversation]?.files?.removeAll { $0.id == id }
         persistDrafts(directory: directory)
     }
+    /// One reaction at a time per message: the phone works out add, switch or
+    /// remove from the reaction it already has, so the next waits for its answer.
     func canReact(_ message: MessageRecord) -> Bool {
-        !pairingBusy && !message.outgoing && canSync && syncEnabled && syncState.canSend && pendingReactions[message.id] == nil && !message.status.contains("DELETED") && !outbox.contains(where: { $0.isReaction && $0.command?.messageID == message.id && ["preparing", "sending", "unknown", "accepted"].contains($0.state) })
+        !pairingBusy && !message.outgoing && canSync && syncEnabled && syncState.canSend && pendingReactions[message.id] == nil && !message.status.contains("DELETED")
     }
-    func ownReaction(_ message: MessageRecord) -> String? {
-        let own = selectedConversation?.ownParticipantIDs ?? []
-        return message.reactions.first { !own.isDisjoint(with: $0.participants ?? []) }?.emoji
-    }
+    /// Shows the reaction on the message straight away; the phone's answer
+    /// settles it (settleReactions), and only a failure is reported.
     func react(_ message: MessageRecord, emoji: String) {
-        guard canReact(message) else { return }
+        guard canReact(message), let conversation = selectedConversation, conversation.id == message.conversationID else { return }
+        // Choosing the reaction already there takes it off, as on the phone.
+        let current = ReactionRecord.own(in: message.reactions, own: conversation.ownParticipantIDs)
+        let emoji = emoji == current ? "" : emoji
+        guard !emoji.isEmpty || current != nil else { return }
         let submission = UUID().uuidString.lowercased()
-        pendingReactions[message.id] = submission
+        let pending = PendingReaction(submission: submission, conversationID: message.conversationID, emoji: emoji, sent: Date())
+        withAnimation(Motion.bouncy) { pendingReactions[message.id] = pending }
+        // A badge makes its row taller; keep the newest messages in view.
+        if TimelinePolicy.followsLatest(atBottom: timelineAtBottom, hasLater: hasLater, highlighting: highlightedID != nil) {
+            scrollRequest = ScrollRequest(messageID: "timeline-bottom", atBottom: true, animated: true)
+        }
         do {
-            try syncController.send(SendCommand(kind: "react", id: submission, conversationID: message.conversationID, body: "", messageID: message.id, emoji: emoji))
-            composerError = nil
-        } catch { composerError = "Reaction status is unconfirmed. Check the phone before trying again." }
+            try deliver(SendCommand(kind: "react", id: submission, conversationID: message.conversationID, body: "", messageID: message.id, emoji: emoji))
+            showReactionNotice(nil)
+        } catch {
+            settleReaction(message.id)
+            reactionFailed(pending, state: "failed", reason: "offline")
+        }
+    }
+    /// Checks each reaction sent from this Mac against the outbox and the phone's copy of its message.
+    private func settleReactions(_ reader: ArchiveDatabase, generation: UUID) async throws {
+        for (messageID, pending) in pendingReactions {
+            let status = try await reader.submission(pending.submission)
+            guard archiveGeneration == generation else { return }
+            guard pendingReactions[messageID] == pending else { continue }
+            switch status?.state {
+            case "applied":
+                let applied = reactionsApplied[pending.submission] ?? Date()
+                reactionsApplied[pending.submission] = applied
+                let own = conversations.first { $0.id == pending.conversationID }?.ownParticipantIDs ?? []
+                let agrees = messages.first { $0.id == messageID }.map { ReactionRecord.own(in: $0.reactions, own: own) == (pending.emoji.isEmpty ? nil : pending.emoji) }
+                // The phone's copy normally follows within seconds. Past that,
+                // or once the message is no longer on screen, show what it has.
+                if agrees ?? true || Date().timeIntervalSince(applied) > 30 { settleReaction(messageID) }
+            case "failed", "unknown":
+                settleReaction(messageID)
+                reactionFailed(pending, state: status?.state ?? "failed", reason: status?.reason ?? "")
+            case nil:
+                // Not picked up yet. Commands wait behind an attachment upload,
+                // but a worker that has gone will never see this one.
+                let waited = Date().timeIntervalSince(pending.sent)
+                if (!syncState.canSend && waited > 3) || waited > 360 {
+                    settleReaction(messageID)
+                    reactionFailed(pending, state: syncState.canSend ? "unknown" : "failed", reason: "offline")
+                }
+            default: break
+            }
+        }
+    }
+    private func settleReaction(_ messageID: String) {
+        guard let pending = pendingReactions[messageID] else { return }
+        reactionsApplied.removeValue(forKey: pending.submission)
+        withAnimation(Motion.bouncy) { _ = pendingReactions.removeValue(forKey: messageID) }
+    }
+    /// Reaction failures for conversations that were not open, shown when each is next opened.
+    @ObservationIgnored private var waitingReactionNotices: [String: String] = [:]
+    private func reactionFailed(_ pending: PendingReaction, state: String, reason: String) {
+        let text: String
+        let subject = pending.emoji.isEmpty ? "Your reaction wasn’t removed" : "Your \(pending.emoji) reaction wasn’t sent"
+        if state == "unknown" {
+            text = (pending.emoji.isEmpty ? "Removing your reaction" : "Your \(pending.emoji) reaction") + " may not have reached your phone. Check it before trying again."
+        } else if reason == "offline" {
+            text = subject + " because your phone isn’t connected."
+        } else {
+            text = subject + ". Your phone couldn’t apply it; try again."
+        }
+        if selectedID == pending.conversationID { showReactionNotice(text) } else { waitingReactionNotices[pending.conversationID] = text }
+    }
+    private func showReactionNotice(_ text: String?) {
+        reactionNoticeTask?.cancel()
+        if reactionNotice != text { reactionNotice = text }
+        guard text != nil else { return }
+        reactionNoticeTask = Task { [weak self] in
+            guard (try? await Task.sleep(for: .seconds(8))) != nil else { return }
+            self?.reactionNotice = nil
+        }
     }
     func scheduleThreadSearch(more: Bool = false) {
         threadSearchTask?.cancel()
@@ -807,18 +1094,31 @@ final class ArchiveModel {
             catch { if threadSearchGeneration == token { threadError = "Conversation search could not be loaded."; threadSearching = false } }
         }
     }
-    func loadLibrary(reset: Bool = true, more: Bool = false) {
+    /// Re-runs Find for new messages, keeping the list's length and showing no spinner.
+    private func refreshThreadSearch() {
+        guard !threadSearching, let database, let id = selectedID, !threadQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        let token = UUID(); threadSearchGeneration = token
+        let query = threadQuery, limit = max(100, threadResults.count)
+        threadSearchTask = Task {
+            guard let result = try? await database.search(query, conversation: id, limit: limit), threadSearchGeneration == token, selectedID == id else { return }
+            if threadResults != result.messages { threadResults = result.messages }
+            if threadTotal != result.total { threadTotal = result.total }
+        }
+    }
+    /// `quiet` refreshes what is already shown, with no spinner or error.
+    func loadLibrary(reset: Bool = true, more: Bool = false, quiet: Bool = false) {
         guard let database, let id = selectedID else { return }
+        if quiet && libraryLoading { return }
         if reset { library = ConversationLibrary(); libraryLimit = 300 }
         if more { libraryLimit += 1000 }
         let token = UUID(); libraryGeneration = token
-        libraryLoading = true; libraryError = nil
+        if !quiet { libraryLoading = true; libraryError = nil }
         Task {
             do {
                 let result = try await database.library(conversation: id, limit: libraryLimit)
                 guard libraryGeneration == token, selectedID == id else { return }
                 library = result; libraryLoading = false
-            } catch { if libraryGeneration == token { libraryError = "Shared items could not be loaded."; libraryLoading = false } }
+            } catch { if libraryGeneration == token, !quiet { libraryError = "Shared items could not be loaded."; libraryLoading = false } }
         }
     }
     func saveSettings(_ value: ArchiveSettings) {
@@ -841,7 +1141,7 @@ final class ArchiveModel {
         return try? await database.cleanupPreview(before: date)
     }
     func switchAccount(_ profile: AccountProfile) {
-        guard !pairingBusy, !savingSettings, !stagingAttachments else { return }
+        guard !pairingBusy, !savingSettings, !stagingAttachments, profile.id != currentAccount?.id || !profile.setupComplete else { return }
         if !profile.setupComplete {
             settingUpAccount = profile; addingAccount.reset(); showingAccountSetup = true; showingAccounts = true
         } else {
@@ -927,6 +1227,7 @@ final class ArchiveModel {
             showingNewMessage = false
             if let conversation = conversations.first(where: { $0.id == status.remoteID }) { filter = conversation.isArchived ? .archived : .inbox }
             select(status.remoteID, force: true)
+            composerFocus = UUID()
         case "failed":
             pendingStart = nil
             startError = status.reason == "offline" ? "The phone connection dropped before it answered. Try again once sync shows Connected."
@@ -950,6 +1251,13 @@ final class ArchiveModel {
     }
     var unreadCount: Int { conversations.filter { isUnread($0) }.count }
     func toggleDetails() { showingDetails.toggle() }
+    /// Moves through the visible list, wrapping at either end.
+    func selectAdjacent(_ step: Int) {
+        let list = visibleConversations
+        guard !list.isEmpty else { return }
+        let index = (list.firstIndex { $0.id == selectedID } ?? (step > 0 ? -1 : 0)) + step
+        select(list[(index % list.count + list.count) % list.count].id)
+    }
     func windowBecameKey() {
         guard highlightedID == nil, timelineAtBottom, !hasLater else { return }
         markVisibleAsSeen()
@@ -962,6 +1270,7 @@ final class ArchiveModel {
         guard timestamp > 0, seenStore.markSeen(id, timestamp: timestamp) else { return }
         seenRevision += 1
         updateBadge()
+        Task { await notifications.clearDelivered(conversation: id) }
     }
     /// Tells the phone the open conversation is read up to its newest message, once per message.
     private func markReadOnPhoneIfNeeded() {
@@ -975,8 +1284,9 @@ final class ArchiveModel {
             markedRead[conversation.id] = latest.id
         } catch { /* Best effort: the phone keeps showing it unread until the next visit. */ }
     }
-    private func updateBadge() {
-        let count = canSync ? unreadCount : 0
+    func updateBadge() {
+        let show = UserDefaults.standard.object(forKey: "dockBadge") as? Bool ?? true
+        let count = canSync && show ? unreadCount : 0
         NSApp.dockTile.badgeLabel = count > 0 ? count.formatted() : nil
     }
     private func apply(_ window: MessageWindow) {

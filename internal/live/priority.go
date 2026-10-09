@@ -26,6 +26,29 @@ func (b *eventBuffer) request(id string, at time.Time) {
 	b.mark(id, at)
 }
 
+// prioritize hands a thread to the priority loop only; unlike request it adds
+// no work to the main loop, which already has the thread queued.
+func (b *eventBuffer) prioritize(id string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if id == "" {
+		return
+	}
+	if b.priority == nil {
+		b.priority = map[string]time.Time{}
+	}
+	if _, ok := b.priority[id]; !ok {
+		if len(b.priority) >= 2048 {
+			return
+		}
+		b.priority[id] = time.Time{}
+	}
+	select {
+	case b.wake <- struct{}{}:
+	default:
+	}
+}
+
 func (b *eventBuffer) takePriority() map[string]time.Time {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -56,16 +79,41 @@ func runPriority(ctx context.Context, store *archive.Store, client source, buffe
 				return
 			}
 			_ = work.run(id, func() error {
-				conv, include, err := client.Lookup(ctx, id)
-				if err != nil || !include {
+				latest, err := store.Latest(id)
+				if err != nil {
 					return err
 				}
-				if err = store.PutConversation(conv); err != nil {
-					return err
+				lookup := func() (bool, error) {
+					conv, include, err := client.Lookup(ctx, id)
+					if err != nil || !include {
+						return false, err
+					}
+					return true, store.PutConversation(conv)
+				}
+				// An unknown thread is looked up first: the include filter (spam,
+				// blocked, deleted) decides whether it is archived at all. A known
+				// one fetches its messages first, so they reach the app a phone
+				// round trip sooner.
+				if latest.IsZero() {
+					if included, err := lookup(); err != nil || !included {
+						return err
+					}
 				}
 				// Bounded fast catch-up; the ordinary queue retains the complete
 				// invalidation and handles any older pages or a transient failure.
-				return CatchUp(ctx, store, client, id, opts.Since, at, 3)
+				if err = CatchUp(ctx, store, client, id, opts.Since, at, 3); err != nil {
+					return err
+				}
+				// A sent photo's message has just been stored: keep the uploaded
+				// file as its original now, so it never shows as "Not saved on this Mac".
+				if _, err = store.AdoptRecentSentOriginals(time.Now().Add(-time.Hour)); err != nil {
+					return err
+				}
+				if !latest.IsZero() {
+					_, err = lookup()
+					return err
+				}
+				return nil
 			})
 		}
 		select {

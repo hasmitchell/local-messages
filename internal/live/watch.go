@@ -107,7 +107,7 @@ func watch(ctx context.Context, store *archive.Store, opts Options, output io.Wr
 		client, err := connect(child, store.Dir, buffer.observe)
 		if err == nil {
 			if sending, ok := client.(sender); ok {
-				router.set(&sendSession{token: uuid.NewString(), ctx: child, client: sending, refresh: func(id string) { buffer.request(id, time.Time{}) }})
+				router.set(&sendSession{token: uuid.NewString(), ctx: child, client: sending, refresh: func(id string, since time.Time) { buffer.request(id, since) }})
 			}
 			started := time.Now()
 			err = runSession(child, store, client, buffer, opts, emit)
@@ -182,6 +182,9 @@ func runSession(ctx context.Context, store *archive.Store, client source, buffer
 		}
 	}()
 	retryDirty := map[string]time.Time{}
+	// Threads already caught up this session that wait only for paced history
+	// pages: they are not fetched again until something new happens in them.
+	caughtUp := map[string]bool{}
 	known := map[string]bool{}
 	lastSweep := map[string]time.Time{}
 	nextBackfill := time.Time{}
@@ -220,14 +223,8 @@ func runSession(ctx context.Context, store *archive.Store, client source, buffer
 			cancel()
 			credentialProblem = err != nil
 		}
-		if len(p.echoes) > 0 || p.save {
-			// A sent photo shows at once from the staged upload, without
-			// waiting for the next media pass.
-			if _, err := store.AdoptSentOriginals(); err != nil {
-				return err
-			}
-		}
 		for id, at := range p.dirty {
+			delete(caughtUp, id)
 			previous, exists := retryDirty[id]
 			if !exists || (!at.IsZero() && (previous.IsZero() || at.Before(previous))) {
 				retryDirty[id] = at
@@ -267,6 +264,14 @@ func runSession(ctx context.Context, store *archive.Store, client source, buffer
 							retryDirty[conv.ID] = time.Time{}
 						}
 						lastSweep[conv.ID] = time.Now()
+						if conv.LastMessage.After(latest) || recent {
+							delete(caughtUp, conv.ID)
+						}
+						// Newer messages in a thread already on this Mac go to the
+						// priority loop rather than waiting their turn in this pass.
+						if !latest.IsZero() && conv.LastMessage.After(latest) {
+							buffer.prioritize(conv.ID)
+						}
 					}
 					known[conv.ID] = true
 				}
@@ -299,8 +304,11 @@ func runSession(ctx context.Context, store *archive.Store, client source, buffer
 				known[id] = true
 			}
 			if err := work.run(id, func() error {
-				if err := CatchUp(ctx, store, client, id, opts.Since, changedAt, opts.MaxPages); err != nil {
-					return err
+				if !caughtUp[id] {
+					if err := CatchUp(ctx, store, client, id, opts.Since, changedAt, opts.MaxPages); err != nil {
+						return err
+					}
+					caughtUp[id] = true
 				}
 				// Older history is imported one page at a time at a bounded pace;
 				// a deferred page keeps the thread queued for the next loop.
@@ -323,10 +331,24 @@ func runSession(ctx context.Context, store *archive.Store, client source, buffer
 				if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, libgm.ErrPhoneNotResponding) || errors.Is(err, libgm.ErrConnectionClosed) {
 					return err
 				}
+				// Paced history is on schedule, not failing: the thread stays queued.
+				if errors.Is(err, errBackfillDeferred) {
+					continue
+				}
 				incomplete = true
 				continue
 			}
 			delete(retryDirty, id)
+			delete(caughtUp, id)
+		}
+
+		if len(p.echoes) > 0 || p.save {
+			// A sent photo shows at once from the staged upload, without
+			// waiting for the next media pass. After the fetches above, so
+			// its message is stored by now.
+			if _, err := store.AdoptSentOriginals(); err != nil {
+				return err
+			}
 		}
 
 		select {

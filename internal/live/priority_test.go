@@ -79,3 +79,35 @@ func TestEarlierHistoryRequestedAfterRetention(t *testing.T) {
 		t.Fatal("completed restored history repeated")
 	}
 }
+
+// A spam or blocked thread (Lookup says exclude) is never archived by a live event.
+type excludedThread struct{ slowInventory }
+
+func (s *excludedThread) Lookup(context.Context, string) (archive.Conversation, bool, error) {
+	return archive.Conversation{ID: "live"}, false, nil
+}
+
+func TestPriorityFetchSkipsExcludedThreads(t *testing.T) {
+	store, err := archive.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	buffer := &eventBuffer{cancel: cancel, wake: make(chan struct{}, 1)}
+	source := &excludedThread{slowInventory{started: make(chan struct{})}}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = runSession(ctx, store, source, buffer, Options{Since: time.Now().AddDate(-1, 0, 0), MaxPages: 100, Media: "none"}, func(string) {})
+	}()
+	<-source.started
+	buffer.request("live", time.Now())
+	time.Sleep(300 * time.Millisecond)
+	cancel()
+	<-done
+	if _, err := store.MessageByID("reply"); err == nil {
+		t.Fatal("an excluded thread's message was archived")
+	}
+}

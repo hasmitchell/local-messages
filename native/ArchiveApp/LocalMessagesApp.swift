@@ -45,7 +45,10 @@ struct LocalMessagesApp: App {
             CommandMenu("Conversation") {
                 Button(model.showingDetails ? "Hide Conversation Info" : "Show Conversation Info", action: model.toggleDetails)
                     .keyboardShortcut("i").disabled(model.selectedID == nil)
-                Button("Jump to Latest Message", action: model.showLatest).keyboardShortcut("j").disabled(model.selectedID == nil)
+                Button("Jump to Latest Message", action: model.jumpToLatest).keyboardShortcut("j").disabled(model.selectedID == nil)
+                Divider()
+                Button("Next Conversation") { model.selectAdjacent(1) }.keyboardShortcut(.tab, modifiers: .control).disabled(model.visibleConversations.isEmpty)
+                Button("Previous Conversation") { model.selectAdjacent(-1) }.keyboardShortcut(.tab, modifiers: [.control, .shift]).disabled(model.visibleConversations.isEmpty)
                 Divider()
                 Button("Reload Archive", action: model.reload).keyboardShortcut("r").disabled(model.loading)
             }

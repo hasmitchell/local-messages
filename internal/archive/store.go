@@ -191,8 +191,10 @@ func (s *Store) UpdateUnread(id string, unread bool, lastMessage time.Time) erro
 	return err
 }
 
+// Upserts below skip rows that would not change: every commit that writes wakes
+// the app (it polls PRAGMA data_version) into re-reading the open conversation.
 func (s *Store) SetMeta(key, value string) error {
-	_, err := s.db.Exec(`INSERT INTO metadata(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, key, value)
+	_, err := s.db.Exec(`INSERT INTO metadata(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE metadata.value IS NOT excluded.value`, key, value)
 	return err
 }
 func (s *Store) Meta(key string) (string, error) {
@@ -213,7 +215,8 @@ func (s *Store) PutConversation(c Conversation) error {
 		return err
 	}
 	defer tx.Rollback()
-	_, err = tx.Exec(`INSERT INTO conversations VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,folder=excluded.folder,last_message=excluded.last_message,unread=excluded.unread`, c.ID, c.Name, c.Folder, c.LastMessage.UnixMicro(), c.Unread)
+	_, err = tx.Exec(`INSERT INTO conversations VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,folder=excluded.folder,last_message=excluded.last_message,unread=excluded.unread
+        WHERE conversations.name IS NOT excluded.name OR conversations.folder IS NOT excluded.folder OR conversations.last_message IS NOT excluded.last_message OR conversations.unread IS NOT excluded.unread`, c.ID, c.Name, c.Folder, c.LastMessage.UnixMicro(), c.Unread)
 	if err != nil {
 		return err
 	}
@@ -222,7 +225,7 @@ func (s *Store) PutConversation(c Conversation) error {
 		if err != nil {
 			return err
 		}
-		if _, err = tx.Exec(`INSERT INTO conversation_details VALUES(?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload`, c.ID, data); err != nil {
+		if _, err = tx.Exec(`INSERT INTO conversation_details VALUES(?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload WHERE conversation_details.payload IS NOT excluded.payload`, c.ID, data); err != nil {
 			return err
 		}
 	}
@@ -243,7 +246,7 @@ func (s *Store) PutPage(messages []Message, p Progress) error {
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec(`INSERT INTO progress VALUES(?,?) ON CONFLICT(conversation_id) DO UPDATE SET payload=excluded.payload`, p.ConversationID, b)
+	_, err = tx.Exec(`INSERT INTO progress VALUES(?,?) ON CONFLICT(conversation_id) DO UPDATE SET payload=excluded.payload WHERE progress.payload IS NOT excluded.payload`, p.ConversationID, b)
 	if err != nil {
 		return err
 	}
@@ -262,7 +265,7 @@ func (s *Store) PutUpdates(messages []Message) error {
 	}
 	for _, m := range messages {
 		_, err = tx.Exec(`INSERT INTO conversations VALUES(?,?,'INBOX',?,0)
-            ON CONFLICT(id) DO UPDATE SET last_message=max(last_message,excluded.last_message)`, m.ConversationID, m.Sender, m.Timestamp.UnixMicro())
+            ON CONFLICT(id) DO UPDATE SET last_message=excluded.last_message WHERE excluded.last_message>conversations.last_message`, m.ConversationID, m.Sender, m.Timestamp.UnixMicro())
 		if err != nil {
 			return err
 		}
@@ -412,7 +415,9 @@ func (s *Store) Search(query, conversation string, limit int) ([]Message, error)
 }
 
 func (s *Store) PendingMedia(since time.Time) ([]Message, error) {
-	rows, err := s.db.Query(`SELECT payload FROM messages WHERE timestamp>=? ORDER BY timestamp DESC`, since.UnixMicro())
+	// Only messages with attachments are decoded; the single connection is
+	// shared with live writes, so a long scan would hold them up.
+	rows, err := s.db.Query(`SELECT payload FROM messages WHERE timestamp>=? AND json_array_length(payload,'$.attachments')>0 ORDER BY timestamp DESC`, since.UnixMicro())
 	if err != nil {
 		return nil, err
 	}

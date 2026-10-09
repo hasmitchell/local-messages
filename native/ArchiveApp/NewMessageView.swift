@@ -7,11 +7,18 @@ struct NewMessageView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var query = ""
     @State private var results: [ContactEntry] = []
+    /// The query `results` belong to, so Return never picks a stale match.
+    @State private var resultsQuery = ""
     @State private var hasContacts = true
     @FocusState private var focused: Bool
 
     private var valid: Bool { SendCommand.normalizedNumber(query) != nil }
     private var waiting: Bool { model.pendingStart != nil }
+    /// Return starts the first contact found for a typed name, as in Messages.
+    private var topMatch: ContactEntry? {
+        guard !valid, !query.trimmingCharacters(in: .whitespaces).isEmpty, resultsQuery == query else { return nil }
+        return results.first
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -40,6 +47,7 @@ struct NewMessageView: View {
                                     Spacer()
                                 }
                                 .padding(.horizontal, 8).padding(.vertical, 5).contentShape(Rectangle())
+                                .background(entry.id == topMatch?.id ? archiveAccent.opacity(0.12) : .clear, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
                             }.buttonStyle(.plain).disabled(waiting || !model.canStartConversation)
                         }
                     }
@@ -60,18 +68,24 @@ struct NewMessageView: View {
                 Spacer()
                 Button("Cancel") { model.pendingStart = nil; dismiss() }.keyboardShortcut(.cancelAction)
                 Button("Start", action: startTyped).prominentButton().keyboardShortcut(.defaultAction)
-                    .disabled(!valid || !model.canStartConversation)
+                    .disabled(!(valid || topMatch != nil) || !model.canStartConversation)
             }
         }
         .padding(22).frame(width: 440)
         .task { await Task.yield(); focused = true }
         .task(id: query) {
+            // The query this search is for: a later keystroke must not inherit its results.
+            let current = query
             hasContacts = await model.hasContacts()
-            results = query.trimmingCharacters(in: .whitespaces).isEmpty ? Array((await model.searchContacts("")).prefix(8)) : await model.searchContacts(query)
+            let found = current.trimmingCharacters(in: .whitespaces).isEmpty ? Array((await model.searchContacts("")).prefix(8)) : await model.searchContacts(current)
+            guard !Task.isCancelled else { return }
+            results = found
+            resultsQuery = current
         }
     }
 
     private func startTyped() {
+        if let top = topMatch { start(top.number); return }
         guard valid, model.canStartConversation else { return }
         model.startConversation(with: query)
     }

@@ -92,13 +92,22 @@ final class MessageNotifications: NSObject, ObservableObject, UNUserNotification
         notifyWhileReading = value
         UserDefaults.standard.set(value, forKey: "notifyWhileReading")
     }
-    func deliver(_ message: MessageRecord, title: String) async {
+    /// Removes a conversation's banners from Notification Center once it has been read here.
+    func clearDelivered(conversation: String) async {
+        guard let token = archiveToken else { return }
+        let thread = Self.token(token + conversation)
+        let ids = await center.deliveredNotifications().filter { $0.request.content.threadIdentifier == thread }.map(\.request.identifier)
+        if !ids.isEmpty { center.removeDeliveredNotifications(withIdentifiers: ids) }
+    }
+    /// `sender` names who wrote in a group conversation.
+    func deliver(_ message: MessageRecord, title: String, sender: String? = nil) async {
         guard enabled, let token = archiveToken else { return }
         await refreshSettings()
         guard enabled, archiveToken == token, permission == .authorized || permission == .provisional else { return }
         let content = UNMutableNotificationContent()
         content.title = previews ? String(title.prefix(120)) : "Local Messages"
         content.body = previews ? String(message.preview.prefix(240)) : "You have a new message."
+        if previews, let sender, !sender.isEmpty { content.subtitle = String(sender.prefix(80)) }
         content.sound = .default
         content.threadIdentifier = Self.token(token + message.conversationID)
         content.categoryIdentifier = Self.messageCategory

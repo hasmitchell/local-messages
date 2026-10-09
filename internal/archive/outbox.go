@@ -56,6 +56,10 @@ func (c SendCommand) Valid() bool {
 	if c.Kind == "typing" {
 		return c.ConversationID != "" && len(c.ConversationID) <= 512 && c.Body == "" && len(c.Files) == 0 && c.MessageID == "" && c.Emoji == "" && c.Number == "" && c.ReplyTo == ""
 	}
+	// dismiss clears a failed or unconfirmed attempt from view; its id is that attempt's.
+	if c.Kind == "dismiss" {
+		return c.ConversationID != "" && len(c.ConversationID) <= 512 && c.Body == "" && len(c.Files) == 0 && c.MessageID == "" && c.Emoji == "" && c.Number == "" && c.ReplyTo == ""
+	}
 	if c.Kind == "mark_read" {
 		return c.ConversationID != "" && len(c.ConversationID) <= 512 && c.MessageID != "" && len(c.MessageID) <= 512 && c.Body == "" && len(c.Files) == 0 && c.Emoji == "" && c.Number == ""
 	}
@@ -151,6 +155,14 @@ func (s *Store) SetSendState(id, state, reason string) error {
 	_, err := s.db.Exec(`UPDATE outbox SET state=?,reason=?,updated=? WHERE id=? AND state!='confirmed'`, state, reason, time.Now().UnixMicro(), id)
 	return err
 }
+
+// DismissSend hides a failed or unconfirmed attempt. If the phone later
+// reports that it did go out, confirmation still applies.
+func (s *Store) DismissSend(id, conversationID string) error {
+	_, err := s.db.Exec(`UPDATE outbox SET state='dismissed',updated=? WHERE id=? AND conversation_id=? AND state IN ('failed','unknown')`, time.Now().UnixMicro(), id, conversationID)
+	return err
+}
+
 func (s *Store) RecoverInterruptedSends() error {
 	// Opening a conversation is idempotent on the phone, so an interrupted
 	// start simply fails and can be retried.
@@ -168,7 +180,7 @@ func (s *Store) SendState(id string) (string, error) {
 }
 
 func (s *Store) ConfirmSend(clientID, conversationID, messageID string) error {
-	_, err := s.db.Exec(`UPDATE outbox SET state='confirmed',remote_id=?,updated=? WHERE id=? AND conversation_id=?`, messageID, time.Now().UnixMicro(), clientID, conversationID)
+	_, err := s.db.Exec(`UPDATE outbox SET state='confirmed',remote_id=?,updated=? WHERE id=? AND conversation_id=? AND (state!='confirmed' OR remote_id!=?)`, messageID, time.Now().UnixMicro(), clientID, conversationID, messageID)
 	return err
 }
 

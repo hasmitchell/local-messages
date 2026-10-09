@@ -35,7 +35,7 @@ func TestStartConversationCommandResolvesAndStoresTheThread(t *testing.T) {
 			defer store.Close()
 			var refreshed []string
 			fake := &fakeStarter{fail: mode == "phone_rejected", result: archive.Conversation{ID: "new-thread", Name: "", Folder: "INBOX", LastMessage: time.Now(), Participants: []archive.Participant{{ID: "p1", Number: "+61400000009"}}}}
-			session := &sendSession{token: "connection", ctx: context.Background(), client: fake, refresh: func(id string) { refreshed = append(refreshed, id) }}
+			session := &sendSession{token: "connection", ctx: context.Background(), client: fake, refresh: func(id string, _ time.Time) { refreshed = append(refreshed, id) }}
 			if mode == "unsupported" {
 				session.client = &fakeSender{store: store, t: t}
 			}

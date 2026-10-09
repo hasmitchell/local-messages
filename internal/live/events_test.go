@@ -27,8 +27,11 @@ func TestEventsCoalesceWithoutReplayOverwrites(t *testing.T) {
 	wg.Wait()
 	b.observe(&libgm.WrappedMessage{Message: &gmproto.Message{ConversationID: "old", Timestamp: now}, IsOld: true})
 	p := b.take()
-	if len(p.dirty) != 1 || p.dirty["c"].UnixMicro() != now-49 {
+	if len(p.dirty) != 2 || p.dirty["c"].UnixMicro() != now-49 {
 		t.Fatal("events not coalesced to oldest change")
+	}
+	if _, ok := p.dirty["old"]; !ok {
+		t.Fatal("a replayed message after reconnecting was not re-read")
 	}
 	if ctx.Err() != nil {
 		t.Fatal("ordinary update disconnected")
@@ -39,6 +42,16 @@ func TestEventsCoalesceWithoutReplayOverwrites(t *testing.T) {
 		t.Fatal("lost logout")
 	}
 }
+func TestNoDataReceivedKeepsTheSession(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	b := &eventBuffer{cancel: cancel}
+	b.observe(&events.NoDataReceived{})
+	if ctx.Err() != nil || b.failureState() != "" || !b.take().inventory {
+		t.Fatal("libgm's own catch-up signal tore down a working session")
+	}
+}
+
 func TestOverflowForcesCatchUpInsteadOfSilentLoss(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // AdoptSentOriginals keeps the files uploaded from this Mac as the local
@@ -17,9 +18,14 @@ import (
 // MMS often carries no download reference, so without this the attachment
 // would read "Not saved on this Mac" while its bytes sit in the staging folder.
 // Returns how many attachments were adopted.
-func (s *Store) AdoptSentOriginals() (int, error) {
+func (s *Store) AdoptSentOriginals() (int, error) { return s.AdoptRecentSentOriginals(time.Time{}) }
+
+// AdoptRecentSentOriginals adopts only for sends confirmed since the given
+// time: cheap enough to run straight after each fetch that may store a sent
+// message, so its photo never shows as missing in between.
+func (s *Store) AdoptRecentSentOriginals(since time.Time) (int, error) {
 	rows, err := s.db.Query(`SELECT o.remote_id,c.payload FROM outbox o JOIN outbox_commands c ON c.id=o.id
-        WHERE o.state='confirmed' AND o.remote_id!='' AND o.conversation_id!='' AND json_array_length(c.payload,'$.files')>0`)
+        WHERE o.state='confirmed' AND o.remote_id!='' AND o.conversation_id!='' AND o.updated>=? AND json_array_length(c.payload,'$.files')>0`, since.UnixMicro())
 	if err != nil {
 		return 0, err
 	}

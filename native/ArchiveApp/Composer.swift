@@ -12,7 +12,9 @@ private struct ComposerContent: View {
     @StateObject private var editorActions = ComposerEditorActions()
     @State private var focused = false
     @State private var choosingFiles = false
-    @State private var editorHeight: CGFloat = 20
+    /// One line of 14 pt text plus the 3 pt insets: what the text view measures when empty.
+    private static let oneLine = ceil(NSLayoutManager().defaultLineHeight(for: .systemFont(ofSize: 14))) + 6
+    @State private var editorHeight: CGFloat = Self.oneLine
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AppStorage("spellCheck") private var spellCheck = true
     @AppStorage("autocorrect") private var autocorrect = false
@@ -21,6 +23,7 @@ private struct ComposerContent: View {
     private struct Note { let text: String; let symbol: String; let warning: Bool }
     private var note: Note? {
         if let error = model.composerError { return Note(text: error, symbol: "exclamationmark.circle.fill", warning: true) }
+        if let notice = model.reactionNotice { return Note(text: notice, symbol: "exclamationmark.circle.fill", warning: true) }
         if model.stagingAttachments { return Note(text: "Preparing attachments…", symbol: "clock", warning: false) }
         if model.draft.submissionID != nil && !model.draftIsInTimeline { return Note(text: "Checking send status. Your text is saved.", symbol: "clock", warning: false) }
         if !model.canSync { return Note(text: "Read-only archive. Drafts are saved on this Mac but cannot be sent from here.", symbol: "lock", warning: false) }
@@ -50,7 +53,9 @@ private struct ComposerContent: View {
                 .buttonStyle(.bouncy).foregroundStyle(.secondary)
                 .disabled(model.draft.submissionID != nil)
                 .help("Emoji & Symbols (⌃⌘Space)").accessibilityLabel("Insert emoji")
-                Button(action: model.sendDraft) {
+                DictationButton(actions: editorActions)
+                    .disabled(model.draft.submissionID != nil)
+                Button(action: send) {
                     Image(systemName: "arrow.up.circle.fill").font(.system(size: 24)).frame(width: 28, height: 28)
                         .symbolEffect(.bounce, options: .nonRepeating, value: reduceMotion ? nil : model.sendPulse)
                 }
@@ -76,25 +81,53 @@ private struct ComposerContent: View {
         .animation(Motion.quick, value: model.draft.replyTo)
         .animation(Motion.quick, value: model.draft.attachments.count)
         .animation(Motion.quick, value: model.composerError)
-        .onChange(of: model.sendPulse) { editorHeight = 22 }
+        .animation(Motion.quick, value: model.reactionNotice)
+        .onChange(of: model.sendPulse) { editorHeight = Self.oneLine }
         .fileImporter(isPresented: $choosingFiles, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
             if case .success(let urls) = result { model.attach(urls) }
         }
     }
 
+    /// Sending ends dictation first, so later words cannot land in the cleared field.
+    private func send() {
+        guard model.canSendDraft else { return }
+        editorActions.stopDictation()
+        model.sendDraft()
+    }
+
     private var editor: some View {
         ComposerTextView(text: Binding(get: { model.draftIsInTimeline ? "" : model.draft.body }, set: { model.editDraft($0) }),
                          isEditable: model.draft.submissionID == nil, spellCheck: spellCheck, autocorrect: autocorrect,
-                         emojiShortcuts: emojiShortcuts, contextID: (model.directory?.path ?? "") + "/" + (model.selectedID ?? ""), actions: editorActions,
+                         emojiShortcuts: emojiShortcuts, contextID: (model.directory?.path ?? "") + "/" + (model.selectedID ?? ""), focusToken: model.composerFocus, actions: editorActions,
                          placeholder: "Message",
-                         onSubmit: { model.sendDraft() },
+                         onSubmit: send,
                          onHeightChange: { editorHeight = $0 },
                          onFocusChange: { focused = $0 },
                          onAttachFiles: { model.attach($0) },
-                         onAttachData: { model.attachData($0, suggestedName: $1) })
-            .frame(height: min(max(editorHeight, 22), 150))
+                         onAttachData: { model.attachData($0, suggestedName: $1) },
+                         onAttachImage: { model.attachConverting($0) })
+            .frame(height: min(max(editorHeight, Self.oneLine), 150))
             .accessibilityIdentifier("messageComposer").accessibilityLabel("Message composer")
             .padding(.vertical, 3)
+    }
+}
+
+// Starts and stops the system's Dictation in the composer. While listening the
+// microphone fills with the accent colour and pulses gently.
+private struct DictationButton: View {
+    @ObservedObject var actions: ComposerEditorActions
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    var body: some View {
+        Button(action: actions.toggleDictation) {
+            Image(systemName: actions.dictating ? "mic.fill" : "mic").font(.system(size: 15, weight: .medium))
+                .symbolEffect(.pulse, options: .repeating, isActive: actions.dictating && !reduceMotion)
+                .contentTransition(.symbolEffect(.replace))
+                .frame(width: 28, height: 28).contentShape(Rectangle())
+        }
+        .buttonStyle(.bouncy).foregroundStyle(actions.dictating ? archiveAccent : Color.secondary)
+        .animation(Motion.quick, value: actions.dictating)
+        .help(actions.dictating ? "Stop dictation" : "Dictate a message with macOS Dictation")
+        .accessibilityLabel(actions.dictating ? "Stop dictation" : "Dictate")
     }
 }
 
@@ -119,11 +152,7 @@ private struct ReplyStrip: View {
 
 private struct AttachmentStrip: View {
     @Environment(ArchiveModel.self) private var model
-    private func stagedURL(_ file: DraftAttachment) -> URL? {
-        // Staged copies live under the archive's private drafts folder; ids are UUIDs.
-        guard let directory = model.directory, file.id.count == 36, file.id.allSatisfy({ $0.isHexDigit || $0 == "-" }) else { return nil }
-        return directory.appendingPathComponent("drafts/attachments/" + file.id)
-    }
+    private func stagedURL(_ file: DraftAttachment) -> URL? { model.directory.flatMap(file.stagedURL(in:)) }
     var body: some View {
         ScrollView(.horizontal) {
             HStack(spacing: 8) {

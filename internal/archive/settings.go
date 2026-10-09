@@ -75,13 +75,17 @@ func (s *Store) PruneBefore(cutoff time.Time) error {
 	if _, err = tx.Exec(`DELETE FROM arrivals WHERE message_id NOT IN (SELECT id FROM messages)`); err != nil {
 		return err
 	}
-	if _, err = tx.Exec(`UPDATE outbox SET body='' WHERE state IN ('confirmed','applied') AND created<?`, cutoff.UnixMicro()); err != nil {
+	if _, err = tx.Exec(`UPDATE outbox SET body='' WHERE state IN ('confirmed','applied','dismissed') AND created<?`, cutoff.UnixMicro()); err != nil {
 		return err
 	}
-	if _, err = tx.Exec(`INSERT OR IGNORE INTO media_gc(path) SELECT 'drafts/attachments/' || json_extract(f.value,'$.id') FROM outbox_commands c JOIN outbox o ON o.id=c.id,json_each(c.payload,'$.files') f WHERE o.state IN ('confirmed','applied') AND o.created<?`, cutoff.UnixMicro()); err != nil {
+	if _, err = tx.Exec(`INSERT OR IGNORE INTO media_gc(path) SELECT 'drafts/attachments/' || json_extract(f.value,'$.id') FROM outbox_commands c JOIN outbox o ON o.id=c.id,json_each(c.payload,'$.files') f WHERE o.state IN ('confirmed','applied','dismissed') AND o.created<?`, cutoff.UnixMicro()); err != nil {
 		return err
 	}
-	if _, err = tx.Exec(`DELETE FROM outbox_commands WHERE id IN (SELECT id FROM outbox WHERE state IN ('confirmed','applied') AND created<?)`, cutoff.UnixMicro()); err != nil {
+	if _, err = tx.Exec(`DELETE FROM outbox_commands WHERE id IN (SELECT id FROM outbox WHERE state IN ('confirmed','applied','dismissed') AND created<?)`, cutoff.UnixMicro()); err != nil {
+		return err
+	}
+	// Settled attempts older than the cutoff have nothing left to show.
+	if _, err = tx.Exec(`DELETE FROM outbox WHERE state IN ('confirmed','applied','resolved','dismissed') AND created<? AND id NOT IN (SELECT id FROM outbox_commands)`, cutoff.UnixMicro()); err != nil {
 		return err
 	}
 	// Reset only historical coverage whose bytes were removed, so disabling

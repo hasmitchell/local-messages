@@ -100,7 +100,10 @@ actor ArchiveDatabase {
     func outbox(conversation: String) throws -> [OutboxRecord] {
         guard try hasTable("outbox") else { return [] }
         let command = try hasTable("outbox_commands") ? "(SELECT payload FROM outbox_commands c WHERE c.id=outbox.id)" : "NULL"
-        let rows = try ReadStatement(connection, "SELECT id,conversation_id,body,state,reason,remote_id,created,\(command) FROM outbox WHERE conversation_id=? AND state!='applied' AND (state!='confirmed' OR NOT EXISTS(SELECT 1 FROM messages WHERE id=outbox.remote_id)) ORDER BY created", [.text(conversation)])
+        // A confirmed send shows as pending only until its message is stored;
+        // one whose message was later removed by cleanup stays gone.
+        let recent = Int64((Date().timeIntervalSince1970 - 600) * 1_000_000)
+        let rows = try ReadStatement(connection, "SELECT id,conversation_id,body,state,reason,remote_id,created,\(command) FROM outbox WHERE conversation_id=? AND state NOT IN ('applied','dismissed') AND (state!='confirmed' OR (updated>? AND NOT EXISTS(SELECT 1 FROM messages WHERE id=outbox.remote_id))) ORDER BY created", [.text(conversation), .integer(recent)])
         var result: [OutboxRecord] = []
         while try rows.next() { result.append(OutboxRecord(id: rows.text(0), conversationID: rows.text(1), body: rows.text(2), state: rows.text(3), reason: rows.text(4), remoteID: rows.text(5), created: rows.integer(6), command: try? JSONDecoder().decode(SendCommand.self, from: rows.data(7)))) }
         return result
@@ -115,7 +118,8 @@ actor ArchiveDatabase {
         if let messageID { window = try around(messageID: messageID, conversation: conversation) }
         else if let visible { window = try refresh(visible, conversation: conversation, followingLatest: followingLatest) }
         else { window = try latest(conversation: conversation) }
-        return try TimelineSnapshot(window: window, outbox: outbox(conversation: conversation))
+        // Reactions are drawn on their message (ArchiveModel.pendingReactions), never as rows.
+        return try TimelineSnapshot(window: window, outbox: outbox(conversation: conversation).filter { !$0.isReaction })
     }
     struct SubmissionStatus: Sendable { let state, reason, remoteID: String }
     func submission(_ id: String) throws -> SubmissionStatus? {

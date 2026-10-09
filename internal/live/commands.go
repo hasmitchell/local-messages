@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.mau.fi/mautrix-gmessages/pkg/libgm"
 	"local/GoogleMessagingAppMac/internal/archive"
 	"local/GoogleMessagingAppMac/internal/google"
 )
@@ -56,10 +57,12 @@ type typer interface {
 	Typing(context.Context, string) error
 }
 type sendSession struct {
-	token   string
-	ctx     context.Context
-	client  sender
-	refresh func(string)
+	token  string
+	ctx    context.Context
+	client sender
+	// refresh re-reads a conversation from the phone, back to `since` when it is
+	// set (a reaction can land on a message older than the usual catch-up window).
+	refresh func(id string, since time.Time)
 }
 type commandRouter struct {
 	mu      sync.Mutex
@@ -70,7 +73,34 @@ type commandRouter struct {
 }
 
 func (r *commandRouter) set(session *sendSession) { r.mu.Lock(); r.session = session; r.mu.Unlock() }
+func (r *commandRouter) current() *sendSession    { r.mu.Lock(); defer r.mu.Unlock(); return r.session }
+
+// phoneRequestTimeout bounds best-effort requests (typing, mark read) so an
+// unresponsive phone cannot hold up the sends queued behind them.
+const phoneRequestTimeout = 15 * time.Second
+
+type queuedCommand struct {
+	command  archive.SendCommand
+	reserved bool
+}
+
+// run records each send the moment it arrives, so the app sees it within
+// milliseconds even while an earlier send, upload or phone request is still in
+// progress. The phone work itself stays in arrival order on one goroutine.
 func (r *commandRouter) run(ctx context.Context, commands <-chan archive.SendCommand) {
+	work := make(chan queuedCommand, 256)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for item := range work {
+			if item.reserved {
+				_ = r.perform(item.command, r.current())
+			} else {
+				_ = r.execute(item.command, r.current())
+			}
+		}
+	}()
+	defer func() { close(work); <-done }()
 	for {
 		select {
 		case <-ctx.Done():
@@ -79,10 +109,28 @@ func (r *commandRouter) run(ctx context.Context, commands <-chan archive.SendCom
 			if !ok {
 				return
 			}
-			r.mu.Lock()
-			session := r.session
-			r.mu.Unlock()
-			_ = r.execute(command, session)
+			item := queuedCommand{command: command}
+			switch command.Kind {
+			case "presence", "dismiss":
+				_ = r.execute(command, nil)
+				continue
+			case "send_text", "react":
+				created, err := r.store.ReserveSend(command)
+				if err != nil || !created {
+					continue
+				}
+				item.reserved = true
+			}
+			select {
+			case work <- item:
+			case <-ctx.Done():
+				// Shutting down: a recorded attempt that will not run must not
+				// sit as 'preparing' until the next start.
+				if item.reserved {
+					_ = r.store.SetSendState(command.ID, "failed", "offline")
+				}
+				return
+			}
 		}
 	}
 }
@@ -93,6 +141,12 @@ func (r *commandRouter) execute(command archive.SendCommand, session *sendSessio
 		}
 		return nil
 	}
+	if command.Kind == "dismiss" {
+		if !command.Valid() {
+			return nil
+		}
+		return r.store.DismissSend(command.ID, command.ConversationID)
+	}
 	if command.IsStart() {
 		return r.start(command, session)
 	}
@@ -102,7 +156,9 @@ func (r *commandRouter) execute(command archive.SendCommand, session *sendSessio
 	if command.Kind == "typing" {
 		if command.Valid() && session != nil && session.ctx.Err() == nil && command.Connection == session.token {
 			if client, ok := session.client.(typer); ok {
-				_ = client.Typing(session.ctx, command.ConversationID)
+				ctx, cancel := context.WithTimeout(session.ctx, phoneRequestTimeout)
+				_ = client.Typing(ctx, command.ConversationID)
+				cancel()
 			}
 		}
 		return nil
@@ -111,6 +167,12 @@ func (r *commandRouter) execute(command archive.SendCommand, session *sendSessio
 	if err != nil || !created {
 		return err
 	}
+	return r.perform(command, session)
+}
+
+// perform does the phone work for a send or reaction already reserved in the outbox.
+func (r *commandRouter) perform(command archive.SendCommand, session *sendSession) error {
+	var err error
 	state := func(value, reason string) error { return r.store.SetSendState(command.ID, value, reason) }
 	if session == nil || session.ctx.Err() != nil || command.Connection != session.token {
 		return state("failed", "offline")
@@ -122,8 +184,8 @@ func (r *commandRouter) execute(command archive.SendCommand, session *sendSessio
 	ctx, cancel := context.WithTimeout(session.ctx, deadline)
 	defer cancel()
 	var send func(context.Context) (bool, error)
+	var target archive.Message
 	if command.Kind == "react" {
-		var target archive.Message
 		target, err = r.store.MessageByID(command.MessageID)
 		if reacting, ok := session.client.(reacter); err == nil && ok && target.ConversationID == command.ConversationID {
 			send, err = reacting.PrepareReaction(ctx, command, target)
@@ -132,6 +194,11 @@ func (r *commandRouter) execute(command archive.SendCommand, session *sendSessio
 		send, err = session.client.PrepareText(ctx, command)
 	}
 	if err != nil || send == nil || ctx.Err() != nil {
+		// A phone that does not answer is a connection problem, not a problem
+		// with the conversation, SIM or files.
+		if ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, libgm.ErrPhoneNotResponding) || errors.Is(err, libgm.ErrConnectionClosed) {
+			return state("failed", "offline")
+		}
 		return state("failed", "preflight")
 	}
 	if err = state("sending", ""); err != nil {
@@ -139,7 +206,7 @@ func (r *commandRouter) execute(command archive.SendCommand, session *sendSessio
 	}
 	accepted, err := send(ctx)
 	if session.refresh != nil {
-		session.refresh(command.ConversationID)
+		session.refresh(command.ConversationID, target.Timestamp)
 	}
 	if err != nil {
 		if errors.Is(err, google.ErrNotSubmitted) {
@@ -187,7 +254,7 @@ func (r *commandRouter) start(command archive.SendCommand, session *sendSession)
 		return err
 	}
 	if session.refresh != nil {
-		session.refresh(conversation.ID)
+		session.refresh(conversation.ID, time.Time{})
 	}
 	return r.store.SetStartResult(command.ID, conversation.ID)
 }
@@ -202,7 +269,9 @@ func (r *commandRouter) markRead(command archive.SendCommand, session *sendSessi
 	if !ok {
 		return nil
 	}
-	if err := client.MarkRead(session.ctx, command.ConversationID, command.MessageID); err != nil {
+	ctx, cancel := context.WithTimeout(session.ctx, phoneRequestTimeout)
+	defer cancel()
+	if err := client.MarkRead(ctx, command.ConversationID, command.MessageID); err != nil {
 		return nil
 	}
 	return r.store.SetUnread(command.ConversationID, false)

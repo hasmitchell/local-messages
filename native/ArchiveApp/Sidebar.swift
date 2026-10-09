@@ -32,7 +32,12 @@ struct ArchiveSidebar: View {
         RenderCount.bump("conversations")
         #endif
         return ScrollViewReader { reader in
-            List(selection: Binding(get: { model.selectedID }, set: { if let id = $0 { model.select(id) } })) {
+            List(selection: Binding(get: { model.selectedID }, set: { id in
+                guard let id else { return }
+                model.select(id)
+                // A click goes on to the composer; arrow keys keep moving through the list.
+                if let type = NSApp.currentEvent?.type, type == .leftMouseDown || type == .leftMouseUp { model.composerFocus = UUID() }
+            })) {
                 Section {
                     ForEach(model.visibleConversations) { conversation in
                         ConversationRow(conversation: conversation, unread: model.isUnread(conversation), draft: model.draftPreviews[conversation.id], avatar: model.avatarURL(conversation), typing: model.isTyping(conversation.id))

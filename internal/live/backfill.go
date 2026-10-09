@@ -51,6 +51,10 @@ func backfillHistory(ctx context.Context, store *archive.Store, source history.S
 	if err != nil {
 		return err
 	}
+	// One page done and more remain: the next page waits for the pace gate.
+	if p.State == "page_limit" {
+		return errBackfillDeferred
+	}
 	if p.State != "boundary_reached" && p.State != "source_exhausted" {
 		return fmt.Errorf("history backfill remains incomplete")
 	}

@@ -56,22 +56,17 @@ struct ConversationDetail: View {
             }
         }
         .animation(Motion.quick, value: dropTargeted)
-        // Files or images dropped anywhere on the conversation are staged as attachments.
+        // Files or images dropped anywhere on the conversation are staged as
+        // attachments, all in one go (staging takes one batch at a time).
         .onDrop(of: [.fileURL, .image], isTargeted: $dropTargeted) { providers in
             guard model.canSync else { return false }
-            for provider in providers {
-                if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
-                    provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier) { item, _ in
-                        let url = (item as? URL) ?? (item as? Data).flatMap { URL(dataRepresentation: $0, relativeTo: nil) }
-                        guard let url else { return }
-                        Task { @MainActor in model.attach([url]) }
-                    }
-                } else if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
-                    provider.loadDataRepresentation(forTypeIdentifier: UTType.image.identifier) { data, _ in
-                        guard let data, let image = NSImage(data: data), let png = PastedImage.png(from: image) else { return }
-                        Task { @MainActor in model.attachData(png, suggestedName: "Dropped image.png") }
-                    }
+            Task { @MainActor in
+                var urls: [URL] = []
+                for provider in providers {
+                    if let url = await DroppedItem.fileURL(from: provider) { urls.append(url) }
+                    else if let (data, name) = await DroppedItem.image(from: provider), let url = model.temporaryFile(data, suggestedName: name) { urls.append(url) }
                 }
+                if !urls.isEmpty { model.attach(urls) }
             }
             return true
         }
@@ -89,6 +84,31 @@ struct ConversationDetail: View {
         .searchable(text: $bindable.threadQuery, isPresented: $bindable.showingThreadSearch, placement: .toolbar, prompt: "Find in Conversation")
         .onChange(of: model.threadQuery) { model.scheduleThreadSearch() }
         .onChange(of: model.showingThreadSearch) { _, showing in if !showing { model.threadSearchDismissed() } }
+    }
+}
+
+@MainActor private enum DroppedItem {
+    static func fileURL(from provider: NSItemProvider) async -> URL? {
+        guard provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) else { return nil }
+        return await withCheckedContinuation { continuation in
+            provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier) { item, _ in
+                continuation.resume(returning: (item as? URL) ?? (item as? Data).flatMap { URL(dataRepresentation: $0, relativeTo: nil) })
+            }
+        }
+    }
+    /// The image as its source compressed it; anything else becomes JPEG (PNG with transparency).
+    static func image(from provider: NSItemProvider) async -> (Data, String)? {
+        for (type, ext) in [(UTType.png, "png"), (.jpeg, "jpg"), (.heic, "heic"), (.gif, "gif")] where provider.hasItemConformingToTypeIdentifier(type.identifier) {
+            if let data = await data(provider, type.identifier) { return (data, "Dropped image." + ext) }
+        }
+        guard provider.hasItemConformingToTypeIdentifier(UTType.image.identifier), let raw = await data(provider, UTType.image.identifier) else { return nil }
+        let converted = await Task.detached(priority: .userInitiated) { NSImage(data: raw).flatMap(PastedImage.compressed(from:)) }.value
+        return converted.map { ($0.data, $0.name.replacingOccurrences(of: "Pasted", with: "Dropped")) }
+    }
+    private static func data(_ provider: NSItemProvider, _ type: String) async -> Data? {
+        await withCheckedContinuation { continuation in
+            provider.loadDataRepresentation(forTypeIdentifier: type) { data, _ in continuation.resume(returning: data) }
+        }
     }
 }
 
@@ -131,7 +151,8 @@ private func timelineEntries(_ messages: [MessageRecord], outbox: [OutboxRecord]
         earlier.outgoing == later.outgoing && earlier.sender == later.sender
             && later.date.timeIntervalSince(earlier.date) < 300 && calendar.isDate(earlier.date, inSameDayAs: later.date)
     }
-    let lastOutgoing = outbox.isEmpty ? messages.last(where: \.outgoing)?.id : nil
+    // Failed or unconfirmed attempts do not take the delivery line from the last real message.
+    let lastOutgoing = outbox.allSatisfy({ $0.state == "failed" || $0.state == "unknown" }) ? messages.last(where: \.outgoing)?.id : nil
     var entries: [TimelineEntry] = []
     entries.reserveCapacity(messages.count + 8)
     for (index, message) in messages.enumerated() {
@@ -143,7 +164,7 @@ private func timelineEntries(_ messages: [MessageRecord], outbox: [OutboxRecord]
         let first = separator || previous.map { !continues($0, message) } ?? true
         let continuesToPending = message.outgoing && outbox.first.map { $0.created >= message.timestamp && $0.created - message.timestamp < 300_000_000 } ?? false
         let last = next.map { !continues(message, $0) } ?? !continuesToPending
-        let showsStatus = message.outgoing && (message.id == lastOutgoing || message.status.contains("FAILED") || message.deliveryLabel == "Sending")
+        let showsStatus = message.outgoing && (message.id == lastOutgoing || message.status.contains("FAILED") || message.deliveryLabel == "Retrying")
         entries.append(TimelineEntry(id: rowID, kind: .message(message, first: first, last: last, showsSender: group && !message.outgoing && first, showsStatus: showsStatus)))
     }
     for (index, pending) in outbox.enumerated() {
@@ -185,11 +206,9 @@ private struct MessageTimeline: View {
         let _ = RenderCount.bump("timeline")
         #endif
         // Worked out when messages change, not on each frame of a resize.
-        let pending = model.displayedOutbox
-        let entries = timelineEntries(model.messages, outbox: pending.filter { !$0.isReaction }, submissions: model.messageSubmissions, group: conversation.isGroup)
+        let entries = timelineEntries(model.messages, outbox: model.displayedOutbox, submissions: model.messageSubmissions, group: conversation.isGroup)
         let context = BubbleContext(model: model, conversation: conversation)
         let bubbles = context.states(model.messages, highlighted: model.highlightedID)
-        let newSend = "outbox-" + model.sendPulse.uuidString.lowercased()
         ScrollViewReader { reader in
             ScrollView {
                 // Message pages are fetched after the selection reaches the UI.
@@ -202,7 +221,7 @@ private struct MessageTimeline: View {
                     }
                     Color.clear.frame(height: 0).onGeometryChange(for: CGFloat.self) { $0.frame(in: .named("timelineContent")).minY } action: { heights.top = $0 }
                     TimelineRows(model: model, entries: entries, bubbles: bubbles,
-                                 directory: context.directory, canReply: context.canReply, bubbleWidth: bubbleWidth, newSend: newSend,
+                                 directory: context.directory, canReply: context.canReply, bubbleWidth: bubbleWidth, arriving: model.arrivingRows,
                                  window: window, heights: heights, measured: measured) {
                         // Coalesce: one redraw once a batch of rows has been measured.
                         guard !heights.redrawPending else { return }
@@ -210,12 +229,7 @@ private struct MessageTimeline: View {
                         Task { @MainActor in heights.redrawPending = false; measured += 1 }
                     }
                     .equatable()
-                    ForEach(pending.filter(\.isReaction)) { pending in
-                        Text("Reaction \(pending.command?.emoji ?? "") · \(pending.label)").font(.caption)
-                            .foregroundStyle(pending.state == "unknown" || pending.state == "failed" ? .orange : .secondary).padding(.top, 8)
-                    }
                     if !model.hasLater && model.isTyping(conversation.id) { TypingIndicator() }
-                    Color.clear.frame(height: 0).animation(Motion.spring, value: model.isTyping(conversation.id))
                     if model.hasLater {
                         LoadMoreButton(title: "Show Later Messages") { model.loadMore(earlier: false) }.disabled(model.paging).padding(.top, 14)
                     }
@@ -225,20 +239,27 @@ private struct MessageTimeline: View {
                     .coordinateSpace(name: "timelineContent")
             }
             .modifier(VisibleWindow(window: $window))
+            .modifier(KeepsBottomOnShrink(enabled: !model.hasLater && model.highlightedID == nil && !model.loadingMessages) {
+                reader.scrollTo("timeline-bottom", anchor: .bottom)
+            })
             .coordinateSpace(name: "timelineViewport")
             .background(TimelineScrollIntent(onScroll: model.userScrolledTimeline))
             .modifier(LegibleToolbarEdge())
             .modifier(ScrollEdgeObserver(edge: .bottom) { if model.timelineAtBottom != $0 { model.timelineAtBottom = $0 } })
             .overlay(alignment: .bottomTrailing) {
-                if !model.followingOwnSend && (model.hasLater || !model.timelineAtBottom) {
-                    FloatingJumpButton(symbol: "arrow.down", title: "Jump to latest messages", action: model.jumpToLatest)
-                    .padding(14)
-                    .accessibilityIdentifier("messagesToBottom")
-                    .transition(.scale(scale: 0.5, anchor: .bottomTrailing).combined(with: .opacity))
+                // Animated here rather than on the scroll view, so the button's
+                // spring never rides along with rows being added or removed.
+                let showsJump = !model.followingOwnSend && !model.followingArrival && (model.hasLater || !model.timelineAtBottom)
+                ZStack {
+                    if showsJump {
+                        FloatingJumpButton(symbol: "arrow.down", title: "Jump to latest messages", action: model.jumpToLatest)
+                        .padding(14)
+                        .accessibilityIdentifier("messagesToBottom")
+                        .transition(.scale(scale: 0.5, anchor: .bottomTrailing).combined(with: .opacity))
+                    }
                 }
+                .animation(Motion.quick, value: showsJump)
             }
-            .animation(Motion.quick, value: model.timelineAtBottom)
-            .animation(Motion.quick, value: model.hasLater)
             .onPreferenceChange(TimelineBottomPreference.self) { bottom in
                 if #unavailable(macOS 15) {
                     let atBottom = bottom >= 0 && bottom <= viewportHeight + 60
@@ -278,14 +299,21 @@ private struct TimelineRows: View, Equatable {
     let directory: URL?
     let canReply: Bool
     let bubbleWidth: CGFloat
-    let newSend: String
+    let arriving: Set<String>
     let window: ClosedRange<CGFloat>?
     let heights: RowHeights
     let measured: Int
     let rowsMeasured: () -> Void
     nonisolated static func == (a: Self, b: Self) -> Bool {
         a.model === b.model && a.entries == b.entries && a.bubbles == b.bubbles && a.directory == b.directory && a.canReply == b.canReply
-            && a.bubbleWidth == b.bubbleWidth && a.newSend == b.newSend && a.window == b.window && a.heights === b.heights && a.measured == b.measured
+            && a.bubbleWidth == b.bubbleWidth && a.arriving == b.arriving && a.window == b.window && a.heights === b.heights && a.measured == b.measured
+    }
+    /// A measured height belongs to the row's content, including a reaction
+    /// from this Mac that is not in the message record yet.
+    private func heightKey(_ entry: TimelineEntry) -> Int {
+        guard case .message(let message, _, _, _, _) = entry.kind, let shown = bubbles[message.id]?.reactions else { return entry.hashValue }
+        var hasher = Hasher(); hasher.combine(entry); hasher.combine(shown)
+        return hasher.finalize()
     }
     /// Rows drawn in full: those near the visible part of the content, and any
     /// whose height at this width is not known yet. The rest become spacers of
@@ -302,7 +330,7 @@ private struct TimelineRows: View, Equatable {
         var placed: [(id: String, top: CGFloat, bottom: CGFloat, full: Bool)] = []
         #endif
         for entry in entries {
-            guard known, let height = heights.height(entry.id, key: entry.hashValue) else { known = false; full.insert(entry.id); continue }
+            guard known, let height = heights.height(entry.id, key: heightKey(entry)) else { known = false; full.insert(entry.id); continue }
             if y + height >= window.lowerBound && y <= window.upperBound { full.insert(entry.id) }
             #if UI_SNAPSHOTS
             placed.append((entry.id, y, y + height, full.contains(entry.id)))
@@ -324,7 +352,7 @@ private struct TimelineRows: View, Equatable {
         // grouping and put every spacer 8 pt per row out of place.
         VStack(spacing: 0) {
             ForEach(entries) { entry in
-                if let full, !full.contains(entry.id), let height = heights.height(entry.id, key: entry.hashValue) {
+                if let full, !full.contains(entry.id), let height = heights.height(entry.id, key: heightKey(entry)) {
                     Color.clear.frame(height: height).id(entry.scrollID)
                 } else {
                     row(entry)
@@ -332,7 +360,7 @@ private struct TimelineRows: View, Equatable {
                             #if UI_SNAPSHOTS
                             RenderCount.actualRows[entry.id] = (frame.minY, frame.height)
                             #endif
-                            if heights.record(entry.id, key: entry.hashValue, height: frame.height, width: bubbleWidth) { rowsMeasured() }
+                            if heights.record(entry.id, key: heightKey(entry), height: frame.height, width: bubbleWidth) { rowsMeasured() }
                         }
                 }
             }
@@ -345,17 +373,23 @@ private struct TimelineRows: View, Equatable {
                     TimelineSeparator(label: label)
                 case .message(let message, let first, let last, let showsSender, let showsStatus):
                     let state = bubbles[message.id] ?? BubbleState()
-                    MessageBubble(model: model, message: message, first: first, last: last, showsSender: showsSender, showsStatus: showsStatus,
+                    MessageBubble(model: model, message: message, reactions: state.reactions ?? message.reactions,
+                                  first: first, last: last, showsSender: showsSender, showsStatus: showsStatus,
                                   highlighted: state.highlighted, maxWidth: bubbleWidth,
                                   directory: directory, canReply: canReply, reactable: state.reactable,
                                   ownReaction: state.ownReaction, replyOriginal: state.original)
                         .id(message.id)
                 case .pending(let message, let first):
-                    OutboxBubble(message: message, maxWidth: bubbleWidth, first: first)
+                    OutboxBubble(message: message, maxWidth: bubbleWidth, first: first, directory: directory)
                 }
             }
-            .modifier(SendBubbleEntrance(isNewSend: entry.id == newSend))
+            .modifier(RowEntrance(isNew: entering(entry), anchor: entry.entranceAnchor))
             .transition(.identity)
+    }
+    /// The row just sent from here or just arrived, or the time label above it.
+    private func entering(_ entry: TimelineEntry) -> Bool {
+        let row = entry.id.hasPrefix("separator-") ? String(entry.id.dropFirst("separator-".count)) : entry.id
+        return arriving.contains(row)
     }
 }
 
@@ -364,6 +398,14 @@ extension TimelineEntry {
     var scrollID: String {
         if case .message(let message, _, _, _, _) = kind { return message.id }
         return id
+    }
+    /// Bubbles grow from their own side.
+    var entranceAnchor: UnitPoint {
+        switch kind {
+        case .separator: .bottom
+        case .message(let message, _, _, _, _): message.outgoing ? .bottomTrailing : .bottomLeading
+        case .pending: .bottomTrailing
+        }
     }
 }
 
@@ -403,18 +445,42 @@ private struct VisibleWindow: ViewModifier {
     }
 }
 
-private struct SendBubbleEntrance: ViewModifier {
-    let isNewSend: Bool
+// A new row rises into place and fades in. Rows built for any other reason
+// (opening a conversation, paging, scrolling back) appear as they are.
+// The composer growing (a reply strip, photos, another line, a note) or the
+// window getting shorter takes height from the bottom of the timeline, while
+// the scroll view keeps its top edge. Re-pin the newest messages each frame of
+// that change, without animation, so they ride up with the composer.
+private struct KeepsBottomOnShrink: ViewModifier {
+    let enabled: Bool
+    let pin: () -> Void
+    struct Viewport: Equatable { var height: CGFloat; var gap: CGFloat }
+    func body(content: Content) -> some View {
+        if #available(macOS 15, *) {
+            content.onScrollGeometryChange(for: Viewport.self) { geometry in
+                Viewport(height: geometry.containerSize.height, gap: geometry.contentSize.height - geometry.visibleRect.maxY)
+            } action: { old, new in
+                guard enabled, new.height < old.height - 0.5, old.gap <= 60 else { return }
+                pin()
+            }
+        } else { content }
+    }
+}
+
+private struct RowEntrance: ViewModifier {
+    let isNew: Bool
+    let anchor: UnitPoint
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var arrived = false
-    private var entering: Bool { isNewSend && !arrived }
+    private var entering: Bool { isNew && !arrived }
     func body(content: Content) -> some View {
         content
             .opacity(entering ? 0 : 1)
             .offset(y: entering && !reduceMotion ? 14 : 0)
-            .scaleEffect(entering && !reduceMotion ? 0.97 : 1, anchor: .bottomTrailing)
-            .task {
-                guard isNewSend else { return }
+            .scaleEffect(entering && !reduceMotion ? 0.97 : 1, anchor: anchor)
+            // Keyed on isNew, so a row can never be left waiting unseen.
+            .task(id: isNew) {
+                guard isNew else { return }
                 await Task.yield()
                 withAnimation(Motion.send) { arrived = true }
             }
@@ -464,13 +530,14 @@ private struct TimelineBottomPreference: PreferenceKey {
 
 // Three pulsing dots in an incoming bubble while the other side types.
 private struct TypingIndicator: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var phase = 0
     var body: some View {
         HStack(spacing: 5) {
             ForEach(0..<3, id: \.self) { index in
                 Circle().fill(Color.secondary).frame(width: 7, height: 7)
                     .opacity(phase == index ? 1 : 0.4)
-                    .offset(y: phase == index ? -4 : 0)
+                    .offset(y: phase == index && !reduceMotion ? -4 : 0)
             }
         }
         .padding(.horizontal, 14).padding(.vertical, 12)
@@ -482,7 +549,7 @@ private struct TypingIndicator: View {
         .task {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(330))
-                withAnimation(Motion.bouncy) { phase = (phase + 1) % 3 }
+                withAnimation(reduceMotion ? .easeInOut(duration: 0.2) : Motion.bouncy) { phase = (phase + 1) % 3 }
             }
         }
     }
@@ -528,11 +595,16 @@ private let quickReactions = ["👍", "❤️", "😂", "😮", "😢", "👎"]
     /// Per-message values; defaults are left out so the map stays small.
     func states(_ messages: [MessageRecord], highlighted: String?) -> [String: BubbleState] {
         var states: [String: BubbleState] = [:]
+        let pending = model.pendingReactions
         for message in messages {
+            // A reaction sent from this Mac shows before the phone confirms it.
+            let reactions = pending[message.id].map { ReactionRecord.applying($0.emoji, by: own, to: message.reactions) }
+            let shown = reactions ?? message.reactions
             let state = BubbleState(highlighted: message.id == highlighted,
                                     reactable: !message.outgoing && model.canReact(message),
-                                    ownReaction: message.reactions.isEmpty ? nil : message.reactions.first { !own.isDisjoint(with: $0.participants ?? []) }?.emoji,
-                                    original: message.replyTo.flatMap { byID[$0] })
+                                    ownReaction: shown.isEmpty ? nil : ReactionRecord.own(in: shown, own: own),
+                                    original: message.replyTo.flatMap { byID[$0] },
+                                    reactions: reactions)
             if state != BubbleState() { states[message.id] = state }
         }
         return states
@@ -543,11 +615,15 @@ private struct BubbleState: Equatable {
     var reactable = false
     var ownReaction: String?
     var original: MessageRecord?
+    /// Set while a reaction from this Mac is on its way to the phone.
+    var reactions: [ReactionRecord]?
 }
 
 private struct MessageBubble: View {
     let model: ArchiveModel
     let message: MessageRecord
+    /// The message's reactions, including one from this Mac the phone has not confirmed yet.
+    let reactions: [ReactionRecord]
     let first: Bool
     let last: Bool
     let showsSender: Bool
@@ -582,7 +658,11 @@ private struct MessageBubble: View {
         return UnevenRoundedRectangle(topLeadingRadius: first ? big : small, bottomLeadingRadius: last ? big : small, bottomTrailingRadius: big, topTrailingRadius: big, style: .continuous)
     }
     private var transport: String? { ["SMS", "MMS", "RCS"].contains(message.transport) ? message.transport : nil }
-    private var statusLine: String { [message.deliveryLabel, transport].compactMap { $0 }.joined(separator: " · ") }
+    /// A message on its way keeps an empty status line; "Sent", "Delivered"
+    /// or "Read" then fills it without the row changing height.
+    private var statusLine: String {
+        message.deliveryLabel == "Sending" ? "" : [message.deliveryLabel, transport].compactMap { $0 }.joined(separator: " · ")
+    }
     private var hoverLabel: String {
         var parts = [RelativeDate.time(message.date)]
         if let transport { parts.append(transport) }
@@ -601,9 +681,9 @@ private struct MessageBubble: View {
     var body: some View {
         rowContent
         .padding(.top, first ? 8 : 2)
-        .padding(.bottom, message.reactions.isEmpty ? 0 : 12)
+        .padding(.bottom, reactions.isEmpty ? 0 : 12)
         // The row grows to make room for reaction badges in the same motion as the badges appear.
-        .animation(Motion.bouncy, value: message.reactions)
+        .animation(Motion.bouncy, value: reactions)
         // The whole row, including the empty space beside the bubble, keeps the
         // hover controls visible while the pointer travels to them.
         .contentShape(Rectangle())
@@ -617,7 +697,7 @@ private struct MessageBubble: View {
     }
 
     @ViewBuilder private var rowContent: some View {
-        let status = showsStatus && !statusLine.isEmpty
+        let status = showsStatus && (message.deliveryLabel != nil || transport != nil)
         if showsSender || status {
             VStack(alignment: message.outgoing ? .trailing : .leading, spacing: 3) {
                 if showsSender {
@@ -626,6 +706,7 @@ private struct MessageBubble: View {
                 placedBubble
                 if status {
                     Text(statusLine).font(.caption2).foregroundStyle(message.status.contains("FAILED") ? .red : .secondary).frame(minHeight: 14).padding(.horizontal, 6)
+                        .contentTransition(.opacity).animation(.easeOut(duration: 0.2), value: statusLine)
                 }
             }
         } else { placedBubble }
@@ -683,15 +764,18 @@ private struct MessageBubble: View {
         .accessibilityLabel("Reply to message")
     }
     @ViewBuilder private var reactionItems: some View {
-        ForEach(quickReactions, id: \.self) { emoji in Button(emoji) { model.react(message, emoji: emoji) } }
+        // Your current reaction is ticked; choosing it again takes it off.
+        ForEach(quickReactions, id: \.self) { emoji in
+            Toggle(emoji, isOn: Binding(get: { ownReaction == emoji }, set: { _ in model.react(message, emoji: emoji) }))
+        }
         if ownReaction != nil { Divider(); Button("Remove My Reaction") { model.react(message, emoji: "") } }
     }
 
     @ViewBuilder private var sizedContent: some View {
-        if message.reactions.isEmpty { content } else {
+        if reactions.isEmpty { content } else {
             ZStack(alignment: .leading) {
                 // A short message still needs room for its reaction badges.
-                ReactionBadges(reactions: message.reactions).hidden().frame(height: 0).padding(.horizontal, 12)
+                ReactionBadges(reactions: reactions).hidden().frame(height: 0).padding(.horizontal, 12)
                 content
             }
         }
@@ -701,12 +785,12 @@ private struct MessageBubble: View {
         .background(imageOnly ? Color.clear : (message.outgoing ? archiveBubble : incomingBubble), in: shape)
         .overlay { if highlighted { shape.strokeBorder(archiveAccent, lineWidth: 2) } }
         .overlay(alignment: message.outgoing ? .bottomLeading : .bottomTrailing) {
-            if !message.reactions.isEmpty {
-                ReactionBadges(reactions: message.reactions).padding(.horizontal, 8).offset(y: 11)
+            if !reactions.isEmpty {
+                ReactionBadges(reactions: reactions).padding(.horizontal, 8).offset(y: 11)
                     .transition(.scale(scale: 0.3, anchor: message.outgoing ? .bottomLeading : .bottomTrailing).combined(with: .opacity))
             }
         }
-        .animation(Motion.bouncy, value: message.reactions)
+        .animation(Motion.bouncy, value: reactions)
         .contextMenu {
             if model.canSync { Button("Reply") { model.setReplyTarget(message) }.disabled(!canReply) }
             if !message.outgoing { Menu("React") { reactionItems }.disabled(!reactable) }
@@ -781,6 +865,7 @@ private struct ReactionBadges: View {
                     .background(Color(nsColor: .controlBackgroundColor), in: Capsule())
                     .overlay(Capsule().strokeBorder(Color.primary.opacity(0.12), lineWidth: 1))
                     .shadow(color: .black.opacity(0.10), radius: 2, y: 1)
+                    .transition(.scale(scale: 0.4).combined(with: .opacity))
             }
         }.fixedSize().help("Reactions")
     }
@@ -830,28 +915,60 @@ private struct AttachmentView: View {
     }
 }
 
+// A message on its way. It looks like the message it will become (photos
+// included, from the staged copies), so confirmation changes nothing on screen;
+// only a failure or an unconfirmed attempt adds a line of text.
 struct OutboxBubble: View {
     @Environment(ArchiveModel.self) private var model
     let message: OutboxRecord
     let maxWidth: CGFloat
     var first = true
+    var directory: URL? = nil
     private var attention: Bool { message.state == "unknown" || message.state == "failed" }
+    private var failed: Bool { message.state == "failed" }
+    private func imageURL(_ file: DraftAttachment) -> URL? {
+        guard file.mime.hasPrefix("image/"), let directory else { return nil }
+        return file.stagedURL(in: directory)
+    }
+    private var imageOnly: Bool {
+        message.body.isEmpty && message.command?.replyTo == nil && !message.files.isEmpty && message.files.allSatisfy { imageURL($0) != nil }
+    }
     var body: some View {
         VStack(alignment: .trailing, spacing: 3) {
             VStack(alignment: .leading, spacing: 6) {
                 if let reply = message.command?.replyTo { ReplyQuote(model: model, conversationID: message.conversationID, outgoing: true, replyID: reply, original: model.messages.first { $0.id == reply }) }
-                ForEach(message.files) { file in Label(file.name, systemImage: file.mime.hasPrefix("image/") ? "photo" : "doc").font(.callout) }
+                ForEach(message.files) { file in
+                    if let url = imageURL(file) {
+                        // Sized as the delivered photo will be (AttachmentView).
+                        let bounds = CGSize(width: min(320, maxWidth - (imageOnly ? 0 : 24)), height: 340)
+                        let size = ImageSizeCache.shared.size(for: url).map { ImageSizeCache.fit($0, into: bounds) } ?? CGSize(width: 240, height: 180)
+                        LocalThumbnail(url: url).frame(width: size.width, height: size.height)
+                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    } else {
+                        Label(file.name, systemImage: "doc").font(.callout)
+                    }
+                }
                 if !message.body.isEmpty { Text(verbatim: message.body).font(.system(size: 14)).lineSpacing(2).textSelection(.enabled) }
             }
-            .padding(.horizontal, 12).padding(.vertical, 8).foregroundStyle(.white)
-            .background(archiveBubble.opacity(message.state == "failed" ? 0.45 : 1), in: UnevenRoundedRectangle(topLeadingRadius: 18, bottomLeadingRadius: 18, bottomTrailingRadius: 18, topTrailingRadius: first ? 18 : 5))
-            HStack(spacing: 5) {
-                if !attention { ProgressView().controlSize(.mini).scaleEffect(0.65).frame(width: 10, height: 10) }
-                Text(attention ? message.label : message.state == "confirmed" ? "Updating…" : "Sending…").font(.caption2).foregroundStyle(attention ? .orange : .secondary)
-            }.frame(minHeight: 14).padding(.horizontal, 6).help(message.label)
-            if message.state == "failed" {
-                Button("Restore as Draft") { model.restoreDraft(message) }.controlSize(.small)
-                    .disabled(!model.draft.body.isEmpty || !model.draft.attachments.isEmpty)
+            .padding(.horizontal, imageOnly ? 0 : 12).padding(.vertical, imageOnly ? 0 : 8).foregroundStyle(.white)
+            .background(imageOnly ? Color.clear : archiveBubble.opacity(failed ? 0.45 : 1), in: UnevenRoundedRectangle(topLeadingRadius: 18, bottomLeadingRadius: 18, bottomTrailingRadius: 18, topTrailingRadius: first ? 18 : 5))
+            .opacity(imageOnly && failed ? 0.45 : 1)
+            // The line is kept while the message is on its way, so the row does
+            // not grow when "Delivered" takes its place.
+            Text(attention ? message.label : "").font(.caption2).foregroundStyle(.orange)
+                .frame(minHeight: 14).padding(.horizontal, 6)
+                .help(attention ? message.label : "")
+            if attention {
+                HStack(spacing: 6) {
+                    if failed {
+                        Button("Restore as Draft") { model.restoreDraft(message) }
+                            .disabled(!model.draft.body.isEmpty || !model.draft.attachments.isEmpty)
+                    }
+                    if model.canDismiss(message) {
+                        Button("Dismiss") { model.dismissSend(message) }
+                            .help(failed ? "Remove this unsent message" : "Remove this notice. If the message did reach your phone, it still appears here.")
+                    }
+                }.controlSize(.small)
             }
         }
         .frame(maxWidth: maxWidth, alignment: .trailing)

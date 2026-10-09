@@ -103,6 +103,26 @@ struct ReactionRecord: Decodable, Sendable, Hashable {
     let emoji: String
     let participants: [String]?
     var count: Int { max(1, participants?.count ?? 0) }
+
+    /// The account's own reaction among these, if any.
+    static func own(in reactions: [ReactionRecord], own: Set<String>) -> String? {
+        reactions.first { !own.isDisjoint(with: $0.participants ?? []) }?.emoji
+    }
+    /// The reactions as they will read once the phone applies the account's
+    /// choice: its earlier reaction comes off and `emoji` (empty to remove) goes
+    /// on. Badges keep their places, so nothing reorders when the phone agrees.
+    static func applying(_ emoji: String, by own: Set<String>, to reactions: [ReactionRecord]) -> [ReactionRecord] {
+        let me = own.min() ?? "me"
+        var placed = emoji.isEmpty
+        var result = reactions.compactMap { reaction -> ReactionRecord? in
+            var people = reaction.participants?.filter { !own.contains($0) }
+            if reaction.emoji == emoji && !placed { people = (people ?? []) + [me]; placed = true }
+            if let people, people.isEmpty { return nil }
+            return ReactionRecord(emoji: reaction.emoji, participants: people)
+        }
+        if !placed { result.append(ReactionRecord(emoji: emoji, participants: [me])) }
+        return result
+    }
 }
 
 struct MessageRecord: Decodable, Identifiable, Sendable, Hashable {
@@ -137,7 +157,8 @@ struct MessageRecord: Decodable, Identifiable, Sendable, Hashable {
         if status.contains("READ") || status.contains("DISPLAYED") { return "Read" }
         if status.contains("DELIVERED") { return "Delivered" }
         if status == "OUTGOING_COMPLETE" { return "Sent" }
-        if status.contains("SENDING") || status.contains("YET_TO_SEND") || status.contains("AWAITING_RETRY") { return "Sending" }
+        if status.contains("AWAITING_RETRY") { return "Retrying" }
+        if status.contains("SENDING") || status.contains("YET_TO_SEND") { return "Sending" }
         if status.contains("SENT") || status.contains("SEND_COMPLETE") { return "Sent" }
         return nil
     }

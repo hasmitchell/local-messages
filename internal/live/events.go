@@ -49,11 +49,11 @@ func (b *eventBuffer) observe(event any) {
 			b.pending.echoes = append(b.pending.echoes, sendEcho{e.GetTmpID(), e.GetConversationID(), e.GetMessageID()})
 			b.mark(e.GetConversationID(), time.Time{})
 		}
-		// Replay is reconciled by catch-up. Treat fresh events as invalidations:
-		// re-read current phone data so an old event cannot overwrite a new edit.
-		if !e.IsOld {
-			b.mark(e.GetConversationID(), time.UnixMicro(e.GetTimestamp()))
-		}
+		// Every event, including the backlog replayed after waking or
+		// reconnecting, only invalidates: catch-up re-reads current phone data,
+		// so a replay cannot overwrite a newer edit, and messages that arrived
+		// while this Mac was away come in at once rather than at the next sweep.
+		b.mark(e.GetConversationID(), time.UnixMicro(e.GetTimestamp()))
 	case *gmproto.TypingData:
 		if b.onTyping != nil && e.GetConversationID() != "" {
 			b.onTyping(e.GetConversationID(), e.GetType() == gmproto.TypingTypes_STARTED_TYPING)
@@ -72,12 +72,14 @@ func (b *eventBuffer) observe(event any) {
 	case *events.GaiaLoggedOut:
 		b.failure = "pairing_required"
 		b.cancel()
-	case *events.ListenFatalError, *events.ListenTemporaryError, *events.NoDataReceived, *events.PhoneNotResponding:
+	case *events.ListenFatalError, *events.ListenTemporaryError, *events.PhoneNotResponding:
 		if b.failure == "" {
 			b.failure = "reconnecting"
 		}
 		b.cancel()
-	case *events.ListenRecovered, *events.PhoneRespondingAgain:
+	// libgm follows NoDataReceived with its own request for missed updates on
+	// a working connection; tearing the session down would only interrupt it.
+	case *events.ListenRecovered, *events.PhoneRespondingAgain, *events.NoDataReceived:
 		b.pending.inventory = true
 	case *events.AuthTokenRefreshed:
 		b.pending.save = true

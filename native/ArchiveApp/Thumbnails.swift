@@ -13,6 +13,8 @@ actor ThumbnailStore {
     init() { cache.totalCostLimit = 48 * 1024 * 1024 }
     func image(at url: URL) -> CachedImage? {
         if let cached = cache.object(forKey: url as NSURL) { return cached }
+        // A row that scrolled away (or became a spacer) no longer needs its decode.
+        guard !Task.isCancelled else { return nil }
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
               let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
                 kCGImageSourceCreateThumbnailFromImageAlways: true,

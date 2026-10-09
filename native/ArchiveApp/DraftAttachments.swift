@@ -7,6 +7,11 @@ struct DraftAttachment: Codable, Sendable, Hashable, Identifiable {
     let id, name, mime, sha256: String
     let size: Int64
     static let byteLimit: Int64 = 25 * 1024 * 1024
+    /// The staged copy under the archive's private drafts folder; ids are UUIDs.
+    func stagedURL(in directory: URL) -> URL? {
+        guard id.count == 36, id.allSatisfy({ $0.isHexDigit || $0 == "-" }) else { return nil }
+        return directory.appendingPathComponent("drafts/attachments/" + id)
+    }
 }
 
 actor AttachmentStager {

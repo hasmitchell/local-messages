@@ -56,10 +56,12 @@ import Foundation
         #!/bin/sh
         archive="$3"
         printf '%s\\n' "start:$archive" >> '\(events.path)'
-        trap 'printf "%s\\n" "stop:$archive" >> "\(events.path)"' EXIT
-        trap 'exit 0' TERM
+        # bash can skip an EXIT trap when SIGTERM interrupts `read`, so the
+        # worker ignores TERM and logs its stop once the app closes stdin.
+        trap '' TERM
         echo '{"state":"connected","time":"2026-09-11T04:00:00Z","connection":"synthetic"}'
         read ignored
+        printf '%s\\n' "stop:$archive" >> '\(events.path)'
         exit 0
         """
         try Data(script.utf8).write(to: worker)
@@ -75,7 +77,7 @@ import Foundation
         sync.configure(directory: nil, enabled: false)
         try await waitUntil { sync.isStopped }
         let lines = try String(contentsOf: events, encoding: .utf8).split(separator: "\n").map(String.init)
-        try check(lines == ["start:" + original.path, "stop:" + original.path, "start:" + pending.path, "stop:" + pending.path, "start:" + original.path, "stop:" + original.path], "workers overlapped or account switch used wrong directory")
+        try check(lines == ["start:" + original.path, "stop:" + original.path, "start:" + pending.path, "stop:" + pending.path, "start:" + original.path, "stop:" + original.path], "workers overlapped or account switch used wrong directory: " + lines.map { $0.hasPrefix("start:") ? "start:" + ($0.hasSuffix(original.path) ? "original" : "pending") : "stop:" + ($0.hasSuffix(original.path) ? "original" : "pending") }.joined(separator: ","))
         // Invalid catalogs must fail closed rather than discarding saved entries.
         try Data("corrupt".utf8).write(to: catalog.appendingPathComponent("accounts.json"))
         do { _ = try AccountStore(root: catalog); throw Failure(message: "corrupt catalog accepted") }

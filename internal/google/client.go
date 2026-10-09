@@ -487,6 +487,8 @@ func (c *Client) Download(ctx context.Context, store *archive.Store, since time.
 	}
 	originalFailures := 0
 	for _, m := range messages {
+		// Most passes change nothing; skip the write (and its transaction) then.
+		before, _ := json.Marshal(m.Attachments)
 		for i := range m.Attachments {
 			if ctx.Err() != nil {
 				return ctx.Err()
@@ -588,6 +590,9 @@ func (c *Client) Download(ctx context.Context, store *archive.Store, since time.
 			if c.MediaProgress != nil {
 				c.MediaProgress("Saved an original attachment.")
 			}
+		}
+		if after, _ := json.Marshal(m.Attachments); bytes.Equal(before, after) {
+			continue
 		}
 		if err = store.UpdateMedia(m); err != nil {
 			return err

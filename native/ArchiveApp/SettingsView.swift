@@ -19,6 +19,7 @@ struct AppSettingsView: View {
 }
 
 private struct GeneralSettings: View {
+    @Environment(ArchiveModel.self) private var model
     @AppStorage("appearance") private var appearance = "system"
     @AppStorage("dockBadge") private var dockBadge = true
     @AppStorage("markReadOnPhone") private var markReadOnPhone = true
@@ -45,6 +46,7 @@ private struct GeneralSettings: View {
                 Text("Try :)  ;)  :D  or <3. Use the smiley button for Emoji & Symbols.").font(.caption).foregroundStyle(.secondary)
             }
         }.formStyle(.grouped).frame(height: 490)
+        .onChange(of: dockBadge) { model.updateBadge() }
     }
 }
 
