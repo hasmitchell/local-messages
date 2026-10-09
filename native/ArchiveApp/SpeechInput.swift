@@ -37,18 +37,29 @@ import Speech
     private var results: Task<Void, Never>?
     private var levels: Task<Void, Never>?
     private(set) var running = false
+    /// True once the microphone is on; before that the session is still preparing.
+    private(set) var listening = false
 
     func start() async throws {
         guard !running else { return }
         running = true
-        do { try await begin() } catch { await teardown(finish: false); throw error }
+        do { try await begin() }
+        // Stopped while preparing: nothing to report, and nothing may be left on.
+        catch is CancellationError { await teardown(finish: false) }
+        catch { await teardown(finish: false); throw error }
     }
+    /// Every await while preparing can outlast a Stop; carry on only if still wanted.
+    private func ensureRunning() throws { if !running { throw CancellationError() } }
+    /// Status from a session that has been stopped is dropped, so it cannot linger.
+    private func status(_ text: String?) { if running { onStatus(text) } }
 
     private func begin() async throws {
-        onStatus("Asking for the microphone…")
-        guard await AVCaptureDevice.requestAccess(for: .audio) else { throw Failure.microphoneDenied }
+        status("Asking for the microphone…")
+        let allowed = await AVCaptureDevice.requestAccess(for: .audio)
+        try ensureRunning()
+        guard allowed else { throw Failure.microphoneDenied }
         let transcriber = try await prepareModel()
-        guard running else { return }
+        try ensureRunning()
         let engine = AVAudioEngine()
         let microphone = engine.inputNode.outputFormat(forBus: 0)
         guard microphone.sampleRate > 0, microphone.channelCount > 0 else { throw Failure.noMicrophone }
@@ -63,20 +74,26 @@ import Speech
 
     /// The model for the user's language, downloaded the first time.
     private func prepareModel() async throws -> SpeechTranscriber {
-        guard let locale = await SpeechTranscriber.supportedLocale(equivalentTo: .current) else { throw Failure.unsupportedLanguage }
+        let supported = await SpeechTranscriber.supportedLocale(equivalentTo: .current)
+        try ensureRunning()
+        guard let locale = supported else { throw Failure.unsupportedLanguage }
         let transcriber = SpeechTranscriber(locale: locale, preset: .progressiveTranscription)
-        if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
-            // One time per language: the system downloads and keeps the model.
-            onStatus("Downloading Apple’s speech model (one time)…")
+        let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber])
+        try ensureRunning()
+        if let request {
+            // Once per app and language. When the system already has the model
+            // (it often does) this takes a moment; otherwise it downloads.
+            status("Getting Apple’s speech model ready…")
             let watch = Task { @MainActor [weak self, progress = request.progress] in
                 while !Task.isCancelled {
                     let percent = Int(progress.fractionCompleted * 100)
-                    if percent > 0 { self?.onStatus("Downloading Apple’s speech model (one time)… \(percent)%") }
+                    if percent > 0 && percent < 100 { self?.status("Downloading Apple’s speech model (one time)… \(percent)%") }
                     try? await Task.sleep(for: .milliseconds(250))
                 }
             }
             defer { watch.cancel() }
             try await request.downloadAndInstall()
+            try ensureRunning()
         }
         return transcriber
     }
@@ -84,15 +101,16 @@ import Speech
     /// Converts audio in `source` format for the model, starts it, and routes
     /// its results. `attach` connects the audio to the returned tap block.
     private func listen(with transcriber: SpeechTranscriber, from source: AVAudioFormat, attach: (@escaping AVAudioNodeTapBlock) throws -> Void) async throws {
-        onStatus("Starting…")
-        guard let format = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber], considering: source),
-              let converter = BufferConverter(from: source, to: format) else { throw Failure.modelUnavailable }
+        status("Starting…")
+        let best = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber], considering: source)
+        try ensureRunning()
+        guard let format = best, let converter = BufferConverter(from: source, to: format) else { throw Failure.modelUnavailable }
         let analyzer = SpeechAnalyzer(modules: [transcriber])
+        self.analyzer = analyzer
         try await analyzer.prepareToAnalyze(in: format)
-        guard running else { return }
+        try ensureRunning()
         let (stream, continuation) = AsyncStream<AnalyzerInput>.makeStream(bufferingPolicy: .bufferingNewest(64))
         let (levelStream, levelContinuation) = AsyncStream<Float>.makeStream(bufferingPolicy: .bufferingNewest(1))
-        self.analyzer = analyzer
         self.input = continuation
         results = Task { @MainActor [weak self] in
             do {
@@ -107,8 +125,10 @@ import Speech
             for await level in levelStream { self?.onLevel(level) }
         }
         try await analyzer.start(inputSequence: stream)
+        try ensureRunning()
         try attach(Self.tap(converter: converter, input: continuation, level: levelContinuation))
-        onStatus(nil)
+        listening = true
+        status(nil)
     }
 
     #if ARCHIVE_TESTING
@@ -139,6 +159,7 @@ import Speech
 
     private func teardown(finish: Bool) async {
         running = false
+        listening = false
         if let engine {
             engine.inputNode.removeTap(onBus: 0)
             engine.stop()
@@ -156,6 +177,7 @@ import Speech
         onLevel(0)
         onStatus(nil)
     }
+
 
     private func ended(_ error: Error?) {
         guard running else { return }

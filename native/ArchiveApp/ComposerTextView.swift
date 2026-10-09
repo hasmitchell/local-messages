@@ -340,8 +340,13 @@ enum PastedImage {
         // Selector observers are removed automatically when this object goes away.
         NotificationCenter.default.addObserver(self, selector: #selector(appResigned), name: NSApplication.didResignActiveNotification, object: nil)
     }
-    // The microphone never stays on behind other windows.
-    @objc private func appResigned(_ note: Notification) { stopDictation() }
+    // The microphone never stays on behind other windows. While the on-device
+    // model is still preparing, the app loses focus to the microphone prompt:
+    // that is not a reason to stop.
+    @objc private func appResigned(_ note: Notification) {
+        if #available(macOS 26, *), let dictation = session as? OnDeviceDictation, !dictation.listening { return }
+        stopDictation()
+    }
 
     static var onDeviceAvailable: Bool {
         if #available(macOS 26, *) { return OnDeviceDictation.isAvailable }
@@ -406,7 +411,11 @@ enum PastedImage {
         textView.markedTextAttributes = [.foregroundColor: NSColor.secondaryLabelColor]
         dictation.onVolatile = { [weak self] text in self?.compose(text, settled: false) }
         dictation.onFinal = { [weak self] text in self?.compose(text, settled: true) }
-        dictation.onStatus = { [weak self] status in if self?.voiceStatus != status { self?.voiceStatus = status } }
+        dictation.onStatus = { [weak self, weak dictation] status in
+            // Only the current session speaks.
+            guard let self, let dictation, self.session === dictation, self.voiceStatus != status else { return }
+            self.voiceStatus = status
+        }
         dictation.onLevel = { [weak self] level in self?.meter.set(level) }
         dictation.onEnded = { [weak self] error in self?.onDeviceEnded(error) }
     }
@@ -475,6 +484,7 @@ enum PastedImage {
         savedMarkedAttributes = nil
         session = nil
         meter.set(0)
+        voiceStatus = nil
     }
     private func showVoiceStatus(_ text: String?) {
         voiceStatus = text

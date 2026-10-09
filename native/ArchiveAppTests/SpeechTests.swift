@@ -32,7 +32,21 @@ import AppKit
                   (lower.contains("nine") || lower.contains("9")), lower.contains("coffee"), sawMarked, !actions.dictating else {
                 print("Speech check failed"); exit(1)
             }
-            print("Speech checks passed: model ready, in-progress words shown as marked text, settled words committed with spacing.")
+            // Stopping while the model is still being prepared (as when the
+            // microphone prompt takes focus) ends cleanly and leaves no status.
+            let early = OnDeviceDictation()
+            var lastStatus: String? = "unset"
+            early.onStatus = { lastStatus = $0 }
+            let run = Task { @MainActor in try await early.transcribe(file: URL(fileURLWithPath: CommandLine.arguments[1])) }
+            try await Task.sleep(for: .milliseconds(10))
+            await early.stop()
+            let outcome = await run.result
+            var cancelled = false
+            if case .failure(let error) = outcome, error is CancellationError { cancelled = true }
+            guard cancelled, lastStatus == nil, !early.running, !early.listening else {
+                print("Speech check failed: a stop during preparation left the session running or its status showing (\(String(describing: lastStatus)))"); exit(1)
+            }
+            print("Speech checks passed: model ready, in-progress words shown as marked text, settled words committed with spacing, stop during preparation is clean.")
         } catch {
             watch.cancel()
             print("Speech check failed:", error); exit(1)
